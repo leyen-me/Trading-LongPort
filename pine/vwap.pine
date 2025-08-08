@@ -1,0 +1,103 @@
+//@version=5
+strategy("vwap",
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1)
+
+// TLSA/1h
+
+// =======================
+// 输入参数
+// =======================
+
+// 高级别 VWAP 计算周期
+tf_vwap = input.timeframe("W", "VWAP 高级别周期")
+
+// 交易方向开关
+allow_long  = input.bool(true,  "允许多单")
+allow_short = input.bool(true,  "允许空单")
+
+// 止盈止损（基于 ATR）
+tp_mult   = input.float(6, "止盈倍数 (ATR)", minval=0.1)
+sl_mult   = input.float(6.5, "止损倍数 (ATR)", minval=0.1)
+trail_mult = input.float(5, "移动止损倍数 (ATR)", minval=0.1)
+atr_len   = input.int(14, "ATR 长度")
+
+// 图形选项
+show_vwap      = input.bool(true,  "显示 VWAP")
+show_prev_vwap = input.bool(false, "显示上周期 VWAP")
+show_bars      = input.bool(true,  "显示 K 线颜色")
+
+// =======================
+// 多时间框架 VWAP 计算
+// =======================
+
+// 记录高级别周期的起点时间
+session_start = request.security(syminfo.tickerid, tf_vwap, time)
+new_session   = ta.change(session_start) != 0
+
+// 累积计算 VWAP
+var float sum_pv   = na  // price * volume 累积
+var float sum_vol  = na  // volume 累积
+var float sum_p2v  = na  // price^2 * volume 累积（可扩展）
+
+if new_session
+    sum_pv  := hl2 * volume
+    sum_vol := volume
+    sum_p2v := hl2 * hl2 * volume
+else
+    sum_pv  += hl2 * volume
+    sum_vol += volume
+    sum_p2v += hl2 * hl2 * volume
+
+// 当前 VWAP
+vwap = sum_vol > 0 ? sum_pv / sum_vol : na
+
+// 上周期 VWAP（仅在新周期记录）
+var float prev_vwap = na
+if new_session
+    prev_vwap := vwap[1]
+
+// =======================
+// 交易信号 & 止盈止损计算
+// =======================
+
+// ATR 计算
+atr_val = ta.atr(atr_len)
+
+// 信号条件
+long_signal  = ta.crossover(close, vwap)   and not new_session
+short_signal = ta.crossunder(close, vwap)  and not new_session
+
+// 多单止盈止损
+tp_long = vwap + tp_mult * atr_val
+sl_long = vwap - sl_mult * atr_val
+
+// 空单止盈止损
+tp_short = vwap - tp_mult * atr_val
+sl_short = vwap + sl_mult * atr_val
+
+// =======================
+// 交易执行
+// =======================
+if allow_long and long_signal
+    strategy.entry("Long", strategy.long)
+
+if allow_short and short_signal
+    strategy.entry("Short", strategy.short)
+
+strategy.exit("Exit Long", from_entry = "Long",limit = tp_long, stop = sl_long, trail_points = trail_mult * atr_val, trail_offset = trail_mult * atr_val)
+
+strategy.exit("Exit Short", from_entry = "Short", limit = tp_short, stop = sl_short, trail_points = trail_mult * atr_val, trail_offset = trail_mult * atr_val)
+
+// =======================
+// 绘图
+// =======================
+col_vwap = close > vwap ? color.green : color.red
+
+plot(show_vwap      ? vwap      : na, "VWAP",           color = col_vwap, linewidth = 2, style = plot.style_circles)
+plot(show_prev_vwap ? prev_vwap : na, "上周期 VWAP",    color = color.orange, style = plot.style_circles)
+barcolor(show_bars ? col_vwap : na)
