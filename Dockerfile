@@ -1,5 +1,5 @@
 # ======== 阶段 1: 构建阶段（使用 nightly） ========
-FROM rustlang/nightly:1.79.0-nightly AS builder
+FROM rustlang/nightly:latest AS builder
 
 WORKDIR /app
 
