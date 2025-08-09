@@ -1,3 +1,0 @@
-longport
-flask
-flask-cors
