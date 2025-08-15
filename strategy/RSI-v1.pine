@@ -1,0 +1,65 @@
+//@version=6
+strategy("RSI", shorttitle="RSI", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.1)
+
+// =============================================================================
+// RSI 指标设置部分
+// =============================================================================
+// RSI 基础参数设置
+rsiLength = input.int(14, title="RSI 周期", minval=1, maxval=100, group="RSI 设置")
+oversold = input.int(28, title="超卖水平", minval=0, maxval=100, group="RSI 设置")
+overbought = input.int(75, title="超买水平", minval=0, maxval=100, group="RSI 设置")
+src = input.source(close, title="数据源", group="RSI 设置")
+
+// 可视化显示控制
+showSignals = input.bool(true, title="显示信号", group="可视化设置")
+showZones = input.bool(true, title="显示超买/超卖区域", group="可视化设置")
+
+// =============================================================================
+// RSI 计算部分
+// =============================================================================
+// 计算 RSI 值
+rsi = ta.rsi(src, rsiLength)
+// 最小峰值强度
+minPeakStrength = 2
+
+// 检测超卖区域的谷值
+// 在当前这根 K 线（bar_index = 0）之前的 rightBars 根 K 线中，是否存在一个价格（或指标值）的“局部最低点”，这个点的左边 leftBars 根和右边 rightBars 根都比它高
+// 换句话说，它是在“回顾历史”，看看有没有符合“山谷”形状的结构
+isRsiDip = not na(ta.pivotlow(rsi, minPeakStrength, minPeakStrength)) 
+
+// 检测超买区域的峰值
+// 在当前这根 K 线（bar_index = 0）之前的 rightBars 根 K 线中，是否存在一个价格（或指标值）的“局部最高点”，这个点的左边 leftBars 根和右边 rightBars 根都比它低
+// 换句话说，它是在“回顾历史”，看看有没有符合“山顶”形状的结构
+isRsiPeak = not na(ta.pivothigh(rsi, minPeakStrength, minPeakStrength))
+
+// 确认 RSI 继续下降（加强信号）
+confirmedAfterDip = ta.rising(rsi, minPeakStrength) and rsi <= oversold
+confirmedAfterPeak = ta.falling(rsi, minPeakStrength) and rsi >= overbought
+
+// 检测穿越信号
+crossOverSold = ta.crossover(rsi, oversold)      // RSI 向上穿越超卖线
+crossUnderBought = ta.crossunder(rsi, overbought) // RSI 向下穿越超买线
+
+// =============================================================================
+// 信号生成和跟踪部分
+// =============================================================================
+// 生成买入和卖出信号
+buySignal =  ((isRsiDip and confirmedAfterDip and (ta.change(rsi, 1) > 0 and (ta.change(rsi, 2) > 0))) or crossOverSold)
+sellSignal = ((isRsiPeak and confirmedAfterPeak and (ta.change(rsi, 1) < 0 and (ta.change(rsi, 2) < 0))) or crossUnderBought)
+
+// =============================================================================
+// 可视化绘制部分
+// =============================================================================
+// 绘制买入信号标记
+plotshape(showSignals ? (buySignal ? oversold - 10 : na) : na, title="买入信号", location=location.belowbar, color=color.new(#00FF00, 0), style=shape.labelup, size=size.tiny)
+// 绘制卖出信号标记
+plotshape(showSignals ? (sellSignal ? overbought + 10 : na) : na, title="卖出信号", location=location.abovebar, color=color.new(#FF0000, 0), style=shape.labeldown, size=size.tiny)
+// 绘制超买超卖区域背景
+bgcolor(showZones and rsi >= overbought ? color.new(#FF5252, 90) : na, title="超买区域")
+bgcolor(showZones and rsi <= oversold ? color.new(#00C853, 90) : na, title="超卖区域")
+
+// =============================================================================
+// 警报设置部分
+// =============================================================================
+alertcondition(buySignal, title="买入信号警报", message="RSI 买入信号，收盘价 {{close}}")
+alertcondition(sellSignal, title="卖出信号警报", message="RSI 卖出信号，收盘价 {{close}}")
