@@ -1,0 +1,63 @@
+//@version=6
+strategy("RSI", shorttitle="RSI", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.1)
+
+
+// =============================================================================
+// 全局固定
+// =============================================================================
+RSI_LENGTH = 14
+MIN_PEAK_STRENGTH = 2
+
+// =============================================================================
+// RSI 指标设置部分
+// =============================================================================
+// RSI 基础参数设置
+oversold = input.int(28, title="超卖水平", minval=0, maxval=100, group="RSI 设置")
+overbought = input.int(75, title="超买水平", minval=0, maxval=100, group="RSI 设置")
+
+// =============================================================================
+// RSI 计算部分
+// =============================================================================
+// 计算 RSI 值
+rsi0 = ta.rsi(close, RSI_LENGTH)
+rsi1 = ta.change(rsi0, 1)
+rsi2 = ta.change(rsi0, 2)
+
+isPeak = ta.falling(rsi0, MIN_PEAK_STRENGTH) and rsi0 >= overbought  // 检测超买区域的峰值
+isDip = ta.rising(rsi0, MIN_PEAK_STRENGTH) and rsi0 <= oversold      // 检测超卖区域的谷值
+
+// 检测穿越信号
+crossOverSold = ta.crossover(rsi0, oversold)      // RSI 向上穿越超卖线
+crossUnderBought = ta.crossunder(rsi0, overbought) // RSI 向下穿越超买线
+
+
+// =============================================================================
+// 信号生成和跟踪部分
+// =============================================================================
+// 生成买入和卖出信号
+
+buySignal = (isDip and rsi1 > 0 and rsi2 > 0) or crossOverSold
+sellSignal = (isPeak and rsi1 < 0 and rsi2 < 0) or crossUnderBought
+
+// =============================================================================
+// 仓位控制
+// =============================================================================
+
+pivotLowPrice = ta.lowest(low, MIN_PEAK_STRENGTH * 2 + 1)
+if strategy.position_size > 0 and sellSignal
+    strategy.close("Long", comment="触发超卖止盈")
+
+if strategy.position_size == 0 and buySignal
+    stopPrice = not na(pivotLowPrice) ? pivotLowPrice : strategy.position_avg_price * 0.98
+
+    strategy.entry("Long", strategy.long, comment = "做多")
+    strategy.exit("Exit Long", from_entry="Long", stop=stopPrice, comment_loss = "触发固定止损")
+
+
+// =============================================================================
+// 可视化绘制部分
+// =============================================================================
+plotshape(buySignal ? oversold - 10 : na, title="买入信号", location=location.belowbar, color=color.new(#00FF00, 0), style=shape.labelup, size=size.tiny)
+plotshape(sellSignal ? overbought + 10 : na, title="卖出信号", location=location.abovebar, color=color.new(#FF0000, 0), style=shape.labeldown, size=size.tiny)
+bgcolor(rsi0 >= overbought ? color.new(#FF5252, 90) : na, title="超买区域")
+bgcolor(rsi0 <= oversold ? color.new(#00C853, 90) : na, title="超卖区域")

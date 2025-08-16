@@ -1,0 +1,176 @@
+//@version=6
+strategy("RSI", shorttitle="RSI", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.1)
+
+
+// =============================================================================
+// 策略
+
+    // 缺点：
+    // 1. 对行情背景（趋势/震荡）没有区分，容易在单边趋势中被连续打脸。抄底一直抄在半山腰，做空一直做在半山腰。
+    // 2. ta.pivotlow / ta.pivothigh 必须等待 右侧 K 线收盘 才能确认峰谷，这天然会延迟信号，可能错过最佳入场点。
+// =============================================================================
+
+
+// =============================================================================
+// 全局固定
+// =============================================================================
+RSI_LENGTH = 14
+MIN_PEAK_STRENGTH = 2
+
+// =============================================================================
+// RSI 指标设置部分
+// =============================================================================
+// RSI 基础参数设置
+oversold = input.int(28, title="超卖水平", minval=0, maxval=100, group="RSI 设置")
+overbought = input.int(75, title="超买水平", minval=0, maxval=100, group="RSI 设置")
+
+// =============================================================================
+// RSI 计算部分
+// =============================================================================
+// 计算 RSI 值
+rsi0 = ta.rsi(close, RSI_LENGTH)
+rsi1 = ta.change(rsi0, 1)
+rsi2 = ta.change(rsi0, 2)
+
+isPeak = ta.falling(rsi0, MIN_PEAK_STRENGTH) and rsi0 >= overbought  // 检测超买区域的峰值
+isDip = ta.rising(rsi0, MIN_PEAK_STRENGTH) and rsi0 <= oversold      // 检测超卖区域的谷值
+
+// 检测穿越信号
+crossOverSold = ta.crossover(rsi0, oversold)      // RSI 向上穿越超卖线
+crossUnderBought = ta.crossunder(rsi0, overbought) // RSI 向下穿越超买线
+
+
+// =============================================================================
+// 新增：每日最多一次亏损交易控制
+// =============================================================================
+
+// 提取日期（忽略时间）
+today = str.format("{0,date,yyyyMMdd}", time)
+
+// 获取最近一次已关闭的交易
+var string lastLossDate = ""
+var bool hasLossToday = false
+
+// 每根K线检查是否有新的平仓交易
+if strategy.closedtrades > 0
+    int tradeIndex = strategy.closedtrades - 1  // 最近一笔交易
+    float tradeProfit = strategy.closedtrades.profit(tradeIndex)
+    int tradeTime = strategy.closedtrades.exit_time(tradeIndex)
+    string tradeDate = str.format("{0,date,yyyyMMdd}", tradeTime)
+
+    // 如果这笔交易是亏损的，并且发生在今天
+    if tradeProfit < 0 and tradeDate == today
+        hasLossToday := true
+
+// 每天开盘重置（UTC 00:00）
+if time("1D") != time("1D", 1)
+    hasLossToday := false
+    lastLossDate := ""
+
+// 只有在没有亏损交易的情况下才允许开仓
+canEnter = not hasLossToday and strategy.position_size == 0
+
+
+// =============================================================================
+// 信号生成和跟踪部分
+// =============================================================================
+// 生成买入和卖出信号
+
+buySignal = (isDip and rsi1 > 0 and rsi2 > 0) or crossOverSold
+sellSignal = (isPeak and rsi1 < 0 and rsi2 < 0) or crossUnderBought
+
+// =============================================================================
+// ATR 通道指标部分
+// =============================================================================
+// ATR 参数设置
+atrPeriods = input.int(10, title="ATR 周期", minval=1, group="ATR 设置")
+atrSource = input.source(close, title="ATR 数据源", group="ATR 设置")
+atrMultiplier = input.float(2.7, title="ATR 倍数", step=0.1, minval=0.1, group="ATR 设置")
+
+// ATR 计算
+atr2 = ta.sma(ta.tr, atrPeriods)  // 简单移动平均的ATR
+atr = ta.atr(atrPeriods)
+
+// 计算上轨和下轨
+up = atrSource - (atrMultiplier * atr)  // 上轨
+up1 = nz(up[1], up)  // 前一个上轨值
+up := close[1] > up1 ? math.max(up, up1) : up  // 更新上轨
+
+dn = atrSource + (atrMultiplier * atr)  // 下轨
+dn1 = nz(dn[1], dn)  // 前一个下轨值
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn  // 更新下轨
+
+// 趋势判断
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// 绘制趋势线
+upPlot = plot(trend == 1 ? up : na, title="上升趋势", style=plot.style_linebr, linewidth=1, color=color.rgb(76, 175, 79, 50))
+dnPlot = plot(trend == 1 ? na : dn, title="下降趋势", style=plot.style_linebr, linewidth=1, color=color.rgb(255, 82, 82, 50))
+
+
+
+
+// =============================================================================
+// Supertrend 指标设置（用于出场）
+// =============================================================================
+
+// 检测趋势反转：从上升趋势（trend == 1）转为下降趋势（trend == -1）
+supertrendFlipShort = (trend[1] == 1) and (trend == -1)
+
+// 趋势仍为上升，但当前收盘价跌破 up 轨道
+trendWeakExit = trend[1] == 1 and trend == 1 and close < up
+
+// 或者更激进一点：连续两根K线收在 up 之下
+trendWeakExitStrong = close < up and close[1] < up
+
+// 出场条件：任一触发
+exitSignal = supertrendFlipShort or trendWeakExit or trendWeakExitStrong
+
+
+// =============================================================================
+// 仓位控制
+// =============================================================================
+
+pivotLowPrice = ta.lowest(low, MIN_PEAK_STRENGTH * 2 + 1)
+initStopPrice = not na(pivotLowPrice) ? pivotLowPrice : strategy.position_avg_price * 0.98
+
+
+// 移动止损距离：例如 3 倍 ATR
+trailATR = ta.atr(14)
+trailStopPrice = high - 4 * trailATR  // 多头移动止损线
+
+// 动态更新移动止损（只能上不能下）
+var float trailStop = na
+if strategy.position_size > 0
+    trailStop := na(trailStop[1]) ? trailStopPrice : math.max(trailStop[1], trailStopPrice)
+else
+    trailStop := na
+
+
+// 可视化
+plot(trailStop, color=color.orange, linewidth=2, title="移动止损线")
+
+// 触发止损
+if  strategy.position_size > 0 and low <= trailStop
+    strategy.close("Long", comment="触发移动止损")
+
+if strategy.position_size > 0 and exitSignal
+    strategy.close("Long", comment="触发超级趋势止损")
+
+if strategy.position_size > 0 and sellSignal
+    strategy.close("Long", comment="触发超卖止损")
+
+if buySignal and canEnter
+    strategy.entry("Long", strategy.long, comment = "做多")
+    log.info("initStopPrice {0}", initStopPrice)
+    strategy.exit("Exit Long", from_entry="Long", stop=initStopPrice, comment_loss = "触发固定止损")
+
+// =============================================================================
+// 可视化绘制部分
+// =============================================================================
+plotshape(buySignal ? oversold - 10 : na, title="买入信号", location=location.belowbar, color=color.new(#00FF00, 0), style=shape.labelup, size=size.tiny)
+plotshape(sellSignal ? overbought + 10 : na, title="卖出信号", location=location.abovebar, color=color.new(#FF0000, 0), style=shape.labeldown, size=size.tiny)
+bgcolor(rsi0 >= overbought ? color.new(#FF5252, 90) : na, title="超买区域")
+bgcolor(rsi0 <= oversold ? color.new(#00C853, 90) : na, title="超卖区域")

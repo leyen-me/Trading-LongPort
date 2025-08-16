@@ -1,0 +1,75 @@
+//@version=6
+indicator("RSI", overlay = true)
+
+
+// =============================================================================
+// 全局固定
+// =============================================================================
+RSI_LENGTH = 14
+MIN_PEAK_STRENGTH = 2
+BB_LENGTH = 20
+BB_MULTIPLIER = 2
+
+// =============================================================================
+// RSI 指标设置部分
+// =============================================================================
+// RSI 基础参数设置
+oversold = input.int(28, title="超卖水平", minval=0, maxval=100, group="RSI 设置")
+overbought = input.int(75, title="超买水平", minval=0, maxval=100, group="RSI 设置")
+
+// =============================================================================
+// RSI 计算部分
+// =============================================================================
+// 计算 RSI 值
+rsi0 = ta.rsi(close, RSI_LENGTH)
+rsi1 = ta.change(rsi0, 1)
+rsi2 = ta.change(rsi0, 2)
+
+isPeak = ta.falling(rsi0, MIN_PEAK_STRENGTH) and rsi0 >= overbought  // 检测超买区域的峰值
+isDip = ta.rising(rsi0, MIN_PEAK_STRENGTH) and rsi0 <= oversold      // 检测超卖区域的谷值
+
+// 检测穿越信号
+crossOverSold = ta.crossover(rsi0, oversold)      // RSI 向上穿越超卖线
+crossUnderBought = ta.crossunder(rsi0, overbought) // RSI 向下穿越超买线
+
+// 布林带
+basis = ta.sma(close, BB_LENGTH)
+dev = BB_MULTIPLIER * ta.stdev(close, BB_LENGTH)
+upperBand = basis + dev
+lowerBand = basis - dev
+
+// =============================================================================
+// 信号生成和跟踪部分
+// =============================================================================
+// 生成买入和卖出信号
+
+buySignal = (isDip and rsi1 > 0 and rsi2 > 0) or crossOverSold
+sellSignal = (isPeak and rsi1 < 0 and rsi2 < 0) or crossUnderBought
+
+// =============================================================================
+// 布林带相关出场信号（更温和的止盈方式）
+// =============================================================================
+priceTouchUpper = high >= upperBand  // 价格触及上轨
+priceBelowUpper = close < upperBand  // 收盘价跌破上轨（可能趋势减弱）
+priceCrossMidUp = ta.crossover(close, basis)  // 回踩中轨后回升
+priceCrossMidDown = ta.crossunder(close, basis)  // 跌破中轨
+
+d1 = priceCrossMidDown
+d2 = priceTouchUpper and priceBelowUpper and rsi0 < overbought
+
+
+// =============================================================================
+// 可视化绘制部分
+// =============================================================================
+
+plotshape(buySignal ? (buySignal ? oversold - 10 : na) : na, title="买入信号", location=location.belowbar, color=color.new(#00FF00, 0), style=shape.labelup, size=size.tiny)
+plotshape(d1 ? (d1 ? overbought + 10 : na) : na, title="买入平仓信号", location=location.abovebar, color=color.new(#FF0000, 0), style=shape.labeldown, size=size.tiny)
+plotshape(d2 ? (d2 ? overbought + 10 : na) : na, title="买入平仓信号", location=location.abovebar, color=color.new(#FF0000, 0), style=shape.labeldown, size=size.tiny)
+
+
+// =============================================================================
+// 警报设置部分
+// =============================================================================
+alertcondition(buySignal, title="买入信号", message="买入信号")
+alertcondition(d1, title="跌破中轨", message="买入平仓信号")
+alertcondition(d2, title="跌破上轨", message="买入平仓信号")

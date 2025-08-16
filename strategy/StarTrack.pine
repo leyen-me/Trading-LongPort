@@ -1,0 +1,327 @@
+//@version=6
+indicator(shorttitle="StarTrack", title="StarTrack", overlay=true)
+
+
+// =============================================================================
+// 公共函数
+// =============================================================================
+
+ma(source, length, _type) =>
+    switch _type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+fzonecolor(obcolor, _call) =>
+    c1 = color.r(obcolor)
+    c2 = color.g(obcolor)
+    c3 = color.b(obcolor)
+    color.rgb(c1, c2, c3, _call)
+
+round_f(x) =>
+    math.round(x / syminfo.mintick) * syminfo.mintick
+
+f_linestyle(_style) =>
+    _style == 'Solid' ? line.style_solid : _style == 'Dotted' ? line.style_dotted : line.style_dashed
+
+// =============================================================================
+// 全局变量
+// =============================================================================
+
+green_color = color.new(#089981, 0)
+red_color = color.new(#F23645, 0)
+
+transparent_color_upper = color.new(#F23645, 70)  // 红色，70% 透明
+transparent_color_lower = color.new(#089981, 70)  // 绿色，70% 透明
+transparent_color_basis = color.new(#2962FF, 70)  // 蓝色，70% 透明
+transparent_color_gap   = color.new(#2196F3, 95)  // 蓝色，95% 透明
+
+volspir_close_     = close
+volspir_low_       = low
+volspir_high_      = high
+volspir_open_      = open
+volspir_bar_index_ = bar_index
+
+// =============================================================================
+// 指标设置 (Indicator Settings)
+// =============================================================================
+
+// 布林线指标设置
+bb_group            = "布林带参数"
+bb_ma_type          = input.string("SMA", "移动平均线类型", options = ["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group=bb_group)
+bb_length           = input.int(20, "布林带周期", minval=1, group=bb_group)
+bb_mult             = input.float(2.0, "标准差乘数", minval=0.001, maxval=50, group=bb_group)
+bb_src              = input(close, title="价格源", group=bb_group)
+bb_offset           = input.int(0, "偏移量", minval=-500, maxval=500, display=display.data_window, group=bb_group)
+
+// 成交量激增指标设置
+volspi_group        = "成交量激增"
+volspi_multiplier   = input.float(1.5, step=0.1, title="交易量倍数阈值", tooltip="此倍数将作为判定交易量激增的阈值。例如，倍数为 2 时，仅显示交易量超过其简单移动平均值两倍的激增点", group=volspi_group)
+volspi_sma_length   = input(100, "交易量 SMA 周期", group=volspi_group)
+volspi_session_time = input.session("0000-0000", "交易时段", group=volspi_group)
+
+// 成交量激增放量回撤指标设置
+volspir_group       = "成交量激增放量回撤"
+
+volspir_vsprice     = input.bool(defval=true,         title='显示历史价格标签?',                              group='成交量激增设置')
+volspir_vsvlength   = input.bool(defval=true,         title='显示历史成交量长度标签?',                      group='成交量激增设置')
+volspir_vslength    = input.int(defval=89,            title='成交量激增周期长度', minval=1,                              group='成交量激增设置')
+volspir_multiplier  = input.float(defval=0.5,         title='倍数',          minval=0.1, step=.1,                   group='成交量激增设置')
+volspir_linecount   = input.int(defval=10,            title='最大线段数',       minval=1, maxval=200,                  group='回撤设置')
+volspir_layout      = 'Wick'
+volspir_linestyle   = 'Dotted' // Dotted \ Dashed
+volspir_linessize   = 1
+volspir_extend      = false
+volspir_vsalerts    = input.bool(defval=true,         title='启用成交量激增警报?',                          group='警报设置')
+volspir_crossalerts = input.bool(defval=false,        title='启用顶/底线被穿越警报?',                    group='警报设置')
+
+// 超级趋势设置
+supt_group = "超级趋势"
+supt_atrPeriod = input(10, "Supertrend ATR 周期", group=supt_group)
+supt_factor = input.float(3.0, "Supertrend 因子", step = 0.01, group=supt_group)
+supt_base_period = input(14, "基础周期", group=supt_group)
+supt_alpha = input.float(0.7, "波动率 Alpha", step = 0.1, group=supt_group)
+supt_buy_pressure_threshold_pct = input.float(1.4, "买入压力阈值 %", step = 0.1, group=supt_group)
+supt_sell_pressure_threshold_pct = input.float(1.4, "卖出压力阈值 %", step = 0.1, group=supt_group)
+
+
+
+// =============================================================================
+// 计算部分 (Calculation Logic)
+// =============================================================================
+
+// 布林线计算
+bb_basis = ma(bb_src, bb_length, bb_ma_type)
+bb_dev   = bb_mult * ta.stdev(bb_src, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+// 交易量激增计算
+volspi_is_within_session    = not na(time(timeframe.period, volspi_session_time))
+volspi_is_valid_high        = high[1] > high[2] and high[1] > high[0]
+volspi_is_valid_low         = low[1] < low[2] and low[1] < low[0]
+volspi_candle_range         = high - low
+volspi_is_valid_hammer      = open > low + volspi_candle_range / 2 and close > low + volspi_candle_range / 2
+volspi_is_valid_shooter     = open < low + volspi_candle_range / 2 and close < low + volspi_candle_range / 2
+volspi_is_valid_high       := volspi_is_valid_high and volspi_is_valid_shooter[1]
+volspi_is_valid_low        := volspi_is_valid_low and volspi_is_valid_hammer[1]
+volspi_vol_spike_check      = volume > ta.sma(volume, volspi_sma_length) * volspi_multiplier and volspi_is_within_session
+volspi_bearish_spike_signal = volspi_is_valid_high and volspi_vol_spike_check[1]
+volspi_bullish_spike_signal = volspi_is_valid_low and volspi_vol_spike_check[1]
+
+// 成交量激增放量回撤计算
+volspir_hvs       = ta.highest(volume, volspir_vslength)
+volspir_abs       = volume * 100 / volspir_hvs * 4 / 5
+volspir_smoothing = ta.ema(volspir_abs, 21)
+volspir_equal     = volspir_abs - volspir_smoothing
+volspir_limit     = ta.highest(volspir_equal, volspir_vslength) * volspir_multiplier
+volspir_cum       = volspir_equal > 0 and volspir_equal >= volspir_limit
+volspir_beardir   = close < open
+volspir_bulldir   = close > open
+volspir_bearvol     = volspir_beardir and volspir_cum ? -1 : 0
+volspir_bullvol     = volspir_bulldir and volspir_cum ?  1 : 0
+volspir_bearbccolor = volspir_bearvol != 0 ? red_color  : na
+volspir_bullbccolor = volspir_bullvol != 0 ? green_color   : na
+var float volspir_bearvolprice = na
+if volspir_bearvol != 0
+    volspir_bearvolprice := volspir_high_
+    volspir_bearvolprice
+var float volspir_bullvolprice = na
+if volspir_bullvol != 0
+    volspir_bullvolprice := volspir_low_
+    volspir_bullvolprice
+var int     volspir_numberofline       = volspir_linecount
+var float   volspir_upperphzone        = na
+var float   volspir_upperplzone        = na
+var float   volspir_lowerphzone        = na
+var float   volspir_lowerplzone        = na
+var line[]  volspir_upperphzonearr     = array.new_line(0, na)
+var line[]  volspir_upperplzonearr     = array.new_line(0, na)
+var line[]  volspir_lowerphzonearr     = array.new_line(0, na)
+var line[]  volspir_lowerplzonearr     = array.new_line(0, na)
+var line    volspir_upperphzoneline    = na
+var line    volspir_upperplzoneline    = na
+var line    volspir_lowerphzoneline    = na
+var line    volspir_lowerplzoneline    = na
+var bool[]  volspir_upperzonetestedarr = array.new_bool(0, false)
+var bool[]  volspir_lowerzonetestedarr = array.new_bool(0, false)
+var bool    volspir_upperzonetested    = false
+var bool    volspir_lowerzonetested    = false
+var bool    volspir_nobool             = true
+var bool    volspir_showprice          = true
+var color   volspir_upperzonecolor     = red_color
+var color   volspir_lowerzonecolor     = green_color
+var label[] volspir_labelpharr         = array.new_label(0, na)
+var label[] volspir_labelplarr         = array.new_label(0, na)
+var label   volspir_labelph            = na
+var label   volspir_labelpl            = na
+
+// 超级趋势计算
+[supt_supertrend, supt_direction] = ta.supertrend(supt_factor, supt_atrPeriod)
+supt_dynamic_range = ta.atr(supt_base_period) * supt_alpha
+supt_upper_threshold = close + supt_dynamic_range
+supt_lower_threshold = close - supt_dynamic_range
+supt_vwap_quarter_period = ta.vwma(hl2 * volume, math.ceil(supt_base_period / 4)) / ta.vwma(volume, math.ceil(supt_base_period / 4))
+supt_vwap_half_period = ta.vwma(hl2 * volume, math.ceil(supt_base_period / 2)) / ta.vwma(volume, math.ceil(supt_base_period / 2))
+supt_vwap_difference = 2 * supt_vwap_quarter_period - supt_vwap_half_period
+supt_vwap_smoothed = ta.vwma(supt_vwap_difference, supt_base_period)
+supt_baseline = 0.0
+supt_baseline := na(supt_baseline[1]) ? ta.sma(close, supt_base_period) : (supt_baseline[1] * (supt_base_period - 1) + close) / supt_base_period
+supt_combined_indicator = 2 * supt_vwap_smoothed * supt_baseline / (supt_vwap_smoothed + supt_baseline)
+supt_buy_condition = supt_combined_indicator <= supt_lower_threshold and close > supt_baseline * (1 + supt_buy_pressure_threshold_pct * 0.01)
+supt_sell_condition = supt_combined_indicator >= supt_upper_threshold and close < supt_baseline * (1 - supt_sell_pressure_threshold_pct * 0.01)
+supt_signal_state = 0
+supt_signal_state := supt_buy_condition ? 1 : supt_sell_condition ? -1 : supt_signal_state[1]
+supt_is_new_buy_signal = supt_buy_condition and supt_signal_state != supt_signal_state[1]
+supt_is_new_sell_signal = supt_sell_condition and supt_signal_state != supt_signal_state[1]
+supt_is_strong_buy_signal = supt_is_new_buy_signal and supt_direction < 0
+supt_is_strong_sell_signal = supt_is_new_sell_signal and supt_direction > 0
+
+
+
+// =============================================================================
+// 绘制
+// =============================================================================
+
+// 布林带绘制
+bb_basis_p = plot(bb_basis, "布林线", color=transparent_color_basis, offset=bb_offset, linewidth=1) // 中轨
+bb_upper_p = plot(bb_upper, "布林线上轨", color=transparent_color_upper, offset=bb_offset, linewidth=1) // 上轨
+bb_lower_p = plot(bb_lower, "布林线下轨", color=transparent_color_lower, offset=bb_offset, linewidth=1) // 下轨
+fill(bb_upper_p, bb_lower_p, title = "布林带", color=transparent_color_gap)  // 两个轨道之间
+
+// 成交量激增绘制
+plotshape(volspi_bearish_spike_signal, color=red_color, style=shape.xcross, location=location.abovebar, size=size.tiny, offset = -2)
+plotshape(volspi_bullish_spike_signal, color=green_color, style=shape.cross, location=location.belowbar, size=size.tiny, offset = -2)
+
+// 成交量激增放量回撤绘制
+plotshape(volspir_bearvol, title='看跌成交量激增', style=shape.triangledown, location=location.abovebar, color=color.new(red_color, 0), size=size.tiny)
+plotshape(volspir_bullvol, title='看涨成交量激增', style=shape.triangleup,   location=location.belowbar, color=color.new(green_color,  0), size=size.tiny)
+barcolor(volspir_bearbccolor)
+barcolor(volspir_bullbccolor)
+
+if volspir_vsprice or volspir_vsvlength
+    volspir_l = ta.crossunder(volspir_bearvol, 0) ?
+         label.new(volspir_bar_index_, volspir_bearvolprice[1] + 0.01,
+             volspir_vsprice and volspir_vsvlength ?
+                 str.tostring(round_f(volspir_bearvolprice)) + ' - ' + str.tostring(math.round(volspir_abs)) :
+                 volspir_vsprice ?
+                     str.tostring(round_f(volspir_bearvolprice)) :
+                     volspir_vsvlength ?
+                         str.tostring(math.round(volspir_abs)) :
+                         na,
+             color=color.new(red_color, 100), textcolor=red_color, style=label.style_label_down, yloc=yloc.abovebar, size=size.small) :
+         ta.crossover(volspir_bullvol, 0) ?
+             label.new(volspir_bar_index_, volspir_bullvolprice[1] + 0.01,
+                 volspir_vsprice and volspir_vsvlength ?
+                     str.tostring(round_f(volspir_bullvolprice)) + ' - ' + str.tostring(math.round(volspir_abs)) :
+                     volspir_vsprice ?
+                         str.tostring(round_f(volspir_bullvolprice)) :
+                         volspir_vsvlength ?
+                             str.tostring(math.round(volspir_abs)) :
+                             na,
+                 color=color.new(green_color, 100), textcolor=green_color, style=label.style_label_up, yloc=yloc.belowbar, size=size.small) :
+         na
+    volspir_l
+
+if volspir_bearvol != 0
+    volspir_upperphzone     := volspir_high_
+    volspir_upperplzone     := volspir_close_ < volspir_open_ ? volspir_close_ : volspir_open_
+    volspir_upperplzoneline := volspir_layout == 'Zone' ? line.new(volspir_bar_index_, volspir_upperplzone, volspir_bar_index_, volspir_upperplzone, width=volspir_linessize) : na
+    volspir_upperphzoneline := volspir_nobool ? line.new(volspir_bar_index_, volspir_upperphzone, volspir_bar_index_, volspir_upperphzone, width=volspir_linessize) : line.new(volspir_bar_index_, (volspir_upperphzone + volspir_upperplzone) / 2, volspir_bar_index_, (volspir_upperphzone + volspir_upperplzone) / 2, width=volspir_linessize)
+    volspir_labelph := volspir_showprice ? label.new(volspir_bar_index_, volspir_nobool ? volspir_upperphzone : (volspir_upperphzone + volspir_upperplzone) / 2, text=str.tostring(volspir_bar_index_ - volspir_bar_index_), textcolor=volspir_upperzonecolor, style=label.style_none) : na
+
+    if array.size(volspir_upperphzonearr) > volspir_numberofline
+        line.delete(array.shift(volspir_upperphzonearr))
+        line.delete(array.shift(volspir_upperplzonearr))
+        array.shift(volspir_upperzonetestedarr)
+        label.delete(array.shift(volspir_labelpharr))
+    array.push(volspir_upperphzonearr, volspir_upperphzoneline)
+    array.push(volspir_upperplzonearr, volspir_upperplzoneline)
+    array.push(volspir_upperzonetestedarr, volspir_extend ? true : false)
+    array.push(volspir_labelpharr, volspir_labelph)
+
+if array.size(volspir_upperplzonearr) > 0
+    for volspir_i = 0 to array.size(volspir_upperplzonearr) - 1 by 1
+        volspir_tempupperline  = array.get(volspir_upperphzonearr,     volspir_i)
+        volspir_templowerline  = array.get(volspir_upperplzonearr,     volspir_i)
+        volspir_linepricelabel = array.get(volspir_labelpharr,         volspir_i)
+        volspir_tested         = array.get(volspir_upperzonetestedarr, volspir_i)
+
+        line.set_style(volspir_tempupperline, f_linestyle(volspir_linestyle))
+        line.set_style(volspir_templowerline, f_linestyle(volspir_linestyle))
+        line.set_color(volspir_tempupperline, color.from_gradient(volspir_i, 1, volspir_numberofline, fzonecolor(volspir_upperzonecolor, 00), fzonecolor(volspir_upperzonecolor, 00)))
+        line.set_color(volspir_templowerline, color.from_gradient(volspir_i, 1, volspir_numberofline, fzonecolor(volspir_upperzonecolor, 00), fzonecolor(volspir_upperzonecolor, 00)))
+        label.set_textcolor(volspir_linepricelabel, color.from_gradient(volspir_i, 1, volspir_numberofline, fzonecolor(volspir_upperzonecolor, 00), volspir_upperzonecolor))
+        label.set_text(volspir_linepricelabel, str.tostring(round_f(line.get_y1(volspir_tempupperline))))
+        label.set_text(volspir_linepricelabel, '                                              顶部回撤 - ' + str.tostring(round_f(line.get_y1(volspir_tempupperline))))
+        label.set_x(volspir_linepricelabel, volspir_bar_index_)
+
+        volspir_crossed = volspir_high_ > line.get_y1(volspir_tempupperline)
+        if volspir_crossed and not volspir_tested
+            array.set(volspir_upperzonetestedarr, volspir_i, true)
+            label.delete(volspir_linepricelabel)
+        if volspir_crossalerts and volspir_crossed and not volspir_tested
+            array.set(volspir_upperzonetestedarr, volspir_i, true)
+            label.delete(volspir_linepricelabel)
+            alert('顶部线已被穿越! 价格为 ' + str.tostring(volspir_close_), alert.freq_once_per_bar)
+        else if volspir_extend ? volspir_tested : not volspir_tested
+            line.set_x2(volspir_tempupperline, volspir_bar_index_)
+            array.set(volspir_upperphzonearr, volspir_i, volspir_tempupperline)
+            line.set_x2(volspir_templowerline, volspir_bar_index_)
+            array.set(volspir_upperplzonearr, volspir_i, volspir_templowerline)
+
+if volspir_bullvol != 0
+    volspir_lowerplzone     := volspir_low_
+    volspir_lowerphzone     := volspir_close_ < volspir_open_ ? volspir_open_ : volspir_close_
+    volspir_lowerphzoneline := volspir_layout == 'Zone' ? line.new(volspir_bar_index_, volspir_lowerphzone, volspir_bar_index_, volspir_lowerphzone, width=volspir_linessize) : na
+    volspir_lowerplzoneline := volspir_nobool ? line.new(volspir_bar_index_, volspir_lowerplzone, volspir_bar_index_, volspir_lowerplzone, width=volspir_linessize) : line.new(volspir_bar_index_, (volspir_lowerphzone + volspir_lowerplzone) / 2, volspir_bar_index_, (volspir_lowerphzone + volspir_lowerplzone) / 2, width=volspir_linessize)
+    volspir_labelpl := volspir_showprice ? label.new(volspir_bar_index_, volspir_nobool ? volspir_lowerplzone : (volspir_lowerphzone + volspir_lowerplzone) / 2, text=str.tostring(volspir_bar_index_ - volspir_bar_index_), textcolor=volspir_lowerzonecolor, style=label.style_none) : na
+
+    if array.size(volspir_lowerphzonearr) > volspir_numberofline
+        line.delete(array.shift(volspir_lowerphzonearr))
+        line.delete(array.shift(volspir_lowerplzonearr))
+        array.shift(volspir_lowerzonetestedarr)
+        label.delete(array.shift(volspir_labelplarr))
+    array.push(volspir_lowerphzonearr, volspir_lowerphzoneline)
+    array.push(volspir_lowerplzonearr, volspir_lowerplzoneline)
+    array.push(volspir_lowerzonetestedarr, volspir_extend ? true : false)
+    array.push(volspir_labelplarr, volspir_labelpl)
+
+if array.size(volspir_lowerplzonearr) > 0
+    for volspir_i = 0 to array.size(volspir_lowerplzonearr) - 1 by 1
+        volspir_tempupperline  = array.get(volspir_lowerphzonearr,     volspir_i)
+        volspir_templowerline  = array.get(volspir_lowerplzonearr,     volspir_i)
+        volspir_linepricelabel = array.get(volspir_labelplarr,         volspir_i)
+        volspir_tested         = array.get(volspir_lowerzonetestedarr, volspir_i)
+
+        line.set_style(volspir_tempupperline, f_linestyle(volspir_linestyle))
+        line.set_style(volspir_templowerline, f_linestyle(volspir_linestyle))
+        line.set_color(volspir_tempupperline, color.from_gradient(volspir_i, 1, volspir_numberofline, fzonecolor(volspir_lowerzonecolor, 00), fzonecolor(volspir_lowerzonecolor, 00)))
+        line.set_color(volspir_templowerline, color.from_gradient(volspir_i, 1, volspir_numberofline, fzonecolor(volspir_lowerzonecolor, 00), fzonecolor(volspir_lowerzonecolor, 00)))
+        label.set_textcolor(volspir_linepricelabel, color.from_gradient(volspir_i, 1, volspir_numberofline, fzonecolor(volspir_lowerzonecolor, 00), volspir_lowerzonecolor))
+        label.set_text(volspir_linepricelabel, str.tostring(round_f(line.get_y1(volspir_templowerline))))
+        label.set_text(volspir_linepricelabel, '                                                   底部回撤 - ' + str.tostring(round_f(line.get_y1(volspir_templowerline))))
+        label.set_x(volspir_linepricelabel, volspir_bar_index_)
+
+        volspir_crossed = volspir_low_ < line.get_y1(volspir_templowerline)
+        if volspir_crossed and not volspir_tested
+            array.set(volspir_lowerzonetestedarr, volspir_i, true)
+            label.delete(volspir_linepricelabel)
+        if volspir_crossalerts and volspir_crossed and not volspir_tested
+            array.set(volspir_lowerzonetestedarr, volspir_i, true)
+            label.delete(volspir_linepricelabel)
+            alert('底部线已被穿越! 价格为 ' + str.tostring(volspir_close_), alert.freq_once_per_bar)
+        else if volspir_extend ? volspir_tested : not volspir_tested
+            line.set_x2(volspir_tempupperline, volspir_bar_index_)
+            array.set(volspir_lowerphzonearr, volspir_i, volspir_tempupperline)
+            line.set_x2(volspir_templowerline, volspir_bar_index_)
+            array.set(volspir_lowerplzonearr, volspir_i, volspir_templowerline)
+
+// 超级趋势绘制
+barcolor(color=supt_signal_state == 1 ? green_color : supt_signal_state == -1 ? red_color : na)
+plotshape(supt_is_new_buy_signal, title="买入信号", text='B', style=shape.labelup, location=location.belowbar, color=green_color, textcolor=color.white, size=size.tiny)
+plotshape(supt_is_new_sell_signal, title="卖出信号", text='S', style=shape.labeldown, location=location.abovebar, color=red_color, textcolor=color.white, size=size.tiny)
+plotshape(supt_is_strong_buy_signal, title="强买入信号", text='🚀', style=shape.labelup, location=location.belowbar, color=green_color, textcolor=color.white, size=size.tiny)
+plotshape(supt_is_strong_sell_signal, title="强卖出信号", text='☄️', style=shape.labeldown, location=location.abovebar, color=red_color, textcolor=color.white, size=size.tiny)
