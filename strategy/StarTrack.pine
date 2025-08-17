@@ -98,6 +98,15 @@ bb_dev   = bb_mult * ta.stdev(bb_src, bb_length)
 bb_upper = bb_basis + bb_dev
 bb_lower = bb_basis - bb_dev
 
+bb_price_touch_lower = high <= bb_lower  // 价格触及下轨
+bb_price_below_lower = close > bb_lower  // 收盘价突破下轨（下跌趋势减弱）
+
+bb_price_touch_upper = high >= bb_upper  // 价格触及上轨
+bb_price_below_upper = close < bb_upper  // 收盘价跌破上轨（上涨趋势减弱）
+bb_price_cross_mid_up = ta.crossover(close, bb_basis)  // 回踩中轨后回升
+bb_price_cross_mid_down = ta.crossunder(close, bb_basis)  // 跌破中轨
+
+
 // 交易量激增计算
 volspi_is_within_session    = not na(time(timeframe.period, volspi_session_time))
 volspi_is_valid_high        = high[1] > high[2] and high[1] > high[0]
@@ -320,8 +329,49 @@ if array.size(volspir_lowerplzonearr) > 0
             array.set(volspir_lowerplzonearr, volspir_i, volspir_templowerline)
 
 // 超级趋势绘制
-barcolor(color=supt_signal_state == 1 ? green_color : supt_signal_state == -1 ? red_color : na)
+// barcolor(color=supt_signal_state == 1 ? green_color : supt_signal_state == -1 ? red_color : na)
 plotshape(supt_is_new_buy_signal, title="买入信号", text='B', style=shape.labelup, location=location.belowbar, color=green_color, textcolor=color.white, size=size.tiny)
 plotshape(supt_is_new_sell_signal, title="卖出信号", text='S', style=shape.labeldown, location=location.abovebar, color=red_color, textcolor=color.white, size=size.tiny)
 plotshape(supt_is_strong_buy_signal, title="强买入信号", text='🚀', style=shape.labelup, location=location.belowbar, color=green_color, textcolor=color.white, size=size.tiny)
 plotshape(supt_is_strong_sell_signal, title="强卖出信号", text='☄️', style=shape.labeldown, location=location.abovebar, color=red_color, textcolor=color.white, size=size.tiny)
+
+
+
+// =============================================================================
+// 警报条件
+// =============================================================================
+
+
+// 价格触及下轨，出现看涨成交量激增回撤
+if bb_price_touch_lower and volspir_bullvol != 0
+    alert('{ "ticker": "{{ticker}}", "action": "buy", "sentiment": "long", "price": "{{close}}", "desc":"🚀 买入警报触发！价格突破布林带下轨，并出现看涨成交量激增回撤信号。" }', alert.freq_once_per_bar)
+
+// 价格触及下轨，收盘价回撤看涨
+if bb_price_touch_lower and bb_price_below_lower
+    alert('{ "ticker": "{{ticker}}", "action": "buy", "sentiment": "long", "price": "{{close}}", "desc":"🚀 买入警报触发！价格突破布林带下轨，并出现布林带回撤信号。" }', alert.freq_once_per_bar)
+
+if supt_is_new_buy_signal
+    alert('🚀 SuperTrend 趋势变盘，建议轻仓买入', alert.freq_once_per_bar)
+
+if supt_is_strong_buy_signal
+    alert('🚀 SuperTrend 趋势变盘，建议重仓买入', alert.freq_once_per_bar)
+
+if bb_price_cross_mid_up
+    alert('🚀 价格站稳布林带中轨', alert.freq_once_per_bar)
+
+
+
+if bb_price_touch_upper and volspir_bearvol != 0
+    alert('{ "ticker": "{{ticker}}", "action": "buy", "sentiment": "flat", "price": "{{close}}", "desc":"☄️ 卖出警报触发！价格突破布林带上轨，并出现看跌成交量激增回撤信号。" }', alert.freq_once_per_bar)
+
+if bb_price_touch_upper and bb_price_below_upper
+    alert('{ "ticker": "{{ticker}}", "action": "buy", "sentiment": "flat", "price": "{{close}}", "desc":"☄️ 卖出警报触发！价格突破布林带上轨，并出现布林带回撤信号。" }', alert.freq_once_per_bar)
+
+if supt_is_new_sell_signal
+    alert('☄️ SuperTrend 趋势变盘，建议轻仓卖出', alert.freq_once_per_bar)
+
+if supt_is_strong_sell_signal
+    alert('☄️ SuperTrend 趋势变盘，建议重仓卖出', alert.freq_once_per_bar)
+
+if bb_price_cross_mid_down
+    alert('☄️ 价格未能站稳布林带中轨', alert.freq_once_per_bar)
