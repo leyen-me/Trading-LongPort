@@ -1,0 +1,108 @@
+// 盈亏比 2:1
+// tsla 3min stopLossPercent=1.1
+// 夏普率为1.2
+
+//@version=5
+strategy("Supertrend Volume",
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1)
+
+
+//Inputs
+highcolor   = input.color(defval=color.red,   title='Top Retracement',                                            group='Chart Customization', inline='customcolor')
+lowcolor    = input.color(defval=color.green, title='Bottom Retracement',                                         group='Chart Customization', inline='customcolor')
+vslength    = input.int(defval=89,            title='Volume Spike Length', minval=1,                              group='Volume Spike Settings')
+multiplier  = input.float(defval=0.5,         title='Multiplier',          minval=0.1, step=.1,                   group='Volume Spike Settings')
+stopLossPercent = input.float(2.5, "止损百分比", minval=0.1, step=0.1, group="止盈止损设置")
+
+//Price Variables Declaration
+
+close_     = close
+low_       = low
+high_      = high
+open_      = open
+bar_index_ = bar_index
+
+//Color Call Function
+
+fzonecolor(obcolor, _call) =>
+    c1 = color.r(obcolor)
+    c2 = color.g(obcolor)
+    c3 = color.b(obcolor)
+    color.rgb(c1, c2, c3, _call)
+
+//Round Function
+
+round_f(x) =>
+    math.round(x / syminfo.mintick) * syminfo.mintick
+
+//Volume Spike Calculation
+
+hvs       = ta.highest(volume, vslength)
+abs       = volume * 100 / hvs * 4 / 5
+smoothing = ta.ema(abs, 21)
+equal     = abs - smoothing
+limit     = ta.highest(equal, vslength) * multiplier
+cum       = equal > 0 and equal >= limit
+beardir   = close < open
+bulldir   = close > open
+
+//Conditions
+
+bearvol     = beardir and cum ? true : false
+bullvol     = bulldir and cum ? true : false
+bearbccolor = bearvol ? highcolor  : na
+bullbccolor = bullvol ? lowcolor   : na
+
+//Boolean Conditions to Float
+
+var float bearvolprice = na
+if bearvol
+    bearvolprice := high_
+    bearvolprice
+var float bullvolprice = na
+if bullvol
+    bullvolprice := low_
+    bullvolprice
+
+atrPeriod = input.int(10,    "ATR Length", minval = 1)
+factor =    input.float(3.0, "Factor",     minval = 0.01, step = 0.01)
+
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+supertrend := barstate.isfirst ? na : supertrend
+
+upTrend =    plot(direction < 0 ? supertrend : na, "Up Trend",   color = color.green, style = plot.style_linebr)
+downTrend =  plot(direction < 0 ? na : supertrend, "Down Trend", color = color.red,   style = plot.style_linebr)
+
+longSignal = ta.change(direction) < 0 and bullvol
+shortSignal = ta.change(direction) > 0 and bearvol
+
+plotshape(longSignal, title='longSignal', style=shape.triangleup,   location=location.belowbar, color=color.new(lowcolor,  0), size=size.tiny)
+plotshape(shortSignal, title='Bearish Volume Spike', style=shape.triangledown, location=location.abovebar, color=color.new(highcolor, 0), size=size.tiny)
+
+
+// 记录开仓时的 bar_index
+var int long_entry_bar = na
+var int short_entry_bar = na
+
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", from_entry = "Long", stop = close * (1 - stopLossPercent/100), limit= close * (1 + stopLossPercent * 2/100), comment="做多止损")
+    long_entry_bar := bar_index_
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", from_entry = "Short", stop = close * (1 + stopLossPercent/100), limit = close * (1 - stopLossPercent * 2/100), comment="做空止损")
+    short_entry_bar := bar_index_
+
+if ta.change(direction) < 0
+    strategy.close("Short", comment="SuperTrend 做空止损")
+
+if ta.change(direction) > 0
+    strategy.close("Long", comment="SuperTrend 做多止损")
