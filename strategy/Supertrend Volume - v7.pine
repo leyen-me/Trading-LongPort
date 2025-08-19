@@ -1,0 +1,105 @@
+//@version=5
+strategy(title = "Supertrend Volume Strategy (Refined)", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.1, pyramiding = 0, calc_on_every_tick = false, process_orders_on_close = true)
+
+// TSLA  3min  夏普率 1.07
+// TSLA  15min 夏普率 0.46
+// NVDA  3min  夏普率 0.18
+// NVDA  15min 夏普率 0.18
+
+// ===============================
+// 1. INPUTS
+// ===============================
+group_appearance   = "Chart Customization"
+input_highcolor    = input.color(color.red,   "Top Retracement",    group = group_appearance, inline = "colors")
+input_lowcolor     = input.color(color.green, "Bottom Retracement", group = group_appearance, inline = "colors")
+
+group_volume       = "Volume Spike (MA×)"
+vol_len            = input.int(50,  "Volume MA Length", minval=2, group=group_volume)
+vol_mult           = input.float(1.5, "Spike ×MA",       step=0.1, group=group_volume)
+
+group_st           = "SuperTrend"
+input_atrPeriod    = input.int(10, "ATR Length", minval = 1, group=group_st)
+input_factor       = input.float(3.0, "Factor", minval = 0.01, step = 0.01, group=group_st)
+
+group_risk         = "Risk Management"
+use_st_stop        = input.bool(true,  "Use SuperTrend as Stop")
+input_stopLossPct  = input.float(2.5,  "Fallback % Stop", minval=0.1, step=0.1)
+
+group_filters      = "Filters"
+use_trend_filter   = input.bool(true,  "HTF/EMA Trend Filter")
+ema_len            = input.int(200,    "EMA Length",   minval=10)
+use_pullback       = input.bool(true,  "Require Pullback After Flip")
+pullback_pct       = input.float(0.3,  "Pullback % of ATR", step=0.1, minval=0.1)
+
+// ===============================
+// 2. INDICATORS
+// ===============================
+[st_val, dir]  = ta.supertrend(input_factor, input_atrPeriod)
+supertrend     = barstate.isfirst ? na : st_val
+is_uptrend     = dir ==  1
+is_downtrend   = dir == -1
+
+// 正确的翻转定义
+long_flip      = ta.change(dir) < 0
+short_flip     = ta.change(dir) > 0
+
+// 量能（均量倍数，排除当根对均值的影响）
+vol_ma         = ta.sma(volume[1], vol_len)
+is_spike       = volume > vol_ma * vol_mult
+is_bull        = close > open
+is_bear        = close < open
+
+bull_spike     = is_bull and is_spike
+bear_spike     = is_bear and is_spike
+
+// 过滤：趋势 + 动量
+ema200         = ta.ema(close, ema_len)
+trend_ok_long  = not use_trend_filter or close > ema200
+trend_ok_short = not use_trend_filter or close < ema200
+
+// “回踩后入场”逻辑：翻多后等待价格回落到ST附近再做多；翻空反之
+atr            = ta.atr(input_atrPeriod)
+pull_dist      = atr * pullback_pct / 100.0
+
+want_pull_long = use_pullback ? (low <= supertrend + pull_dist)  : true
+want_pull_short= use_pullback ? (high >= supertrend - pull_dist) : true
+
+// 最终信号（翻转 + 量能 + 过滤 + 回踩）
+final_long     = long_flip  and bull_spike and trend_ok_long
+final_short    = short_flip and bear_spike and trend_ok_short
+
+
+// ===============================
+// 3. PLOTTING
+// ===============================
+plot(dir < 0 ? supertrend : na, "Up Trend",   color=color.green, style=plot.style_linebr)
+plot(dir < 0 ? na : supertrend, "Down Trend", color=color.red,   style=plot.style_linebr)
+plotshape(final_long,  "Long",  shape.triangleup,   location.belowbar, color=input_lowcolor,  size=size.small)
+plotshape(final_short, "Short", shape.triangledown, location.abovebar, color=input_highcolor, size=size.small)
+
+// ===============================
+// 4. ORDERS
+// ===============================
+// 反向信号 = 平旧开新（pyramiding=0 可自动处理），也可手动先 close 再 entry
+if final_long
+    // 若当前是空头，strategy 会先平空再开多
+    strategy.entry("Long", strategy.long, comment="ST Flip+Vol+Filters")
+
+if final_short
+    strategy.entry("Short", strategy.short, comment="ST Flip+Vol+Filters")
+
+// 止损：每根bar更新（重要）
+long_pct_stop   = strategy.position_avg_price * (1 - input_stopLossPct/100)
+short_pct_stop  = strategy.position_avg_price * (1 + input_stopLossPct/100)
+long_st_stop    = nz(supertrend)       // 多单用ST作为“地板”
+short_st_stop   = nz(supertrend)       // 空单用ST作为“天花板”
+
+// 选择ST止损或百分比止损（取更保守的那一个）
+long_stop       = use_st_stop ? math.max(long_pct_stop, long_st_stop)  : long_pct_stop
+short_stop      = use_st_stop ? math.min(short_pct_stop, short_st_stop): short_pct_stop
+
+if strategy.position_size > 0
+    strategy.exit("Exit Long",  from_entry="Long",  stop=long_stop)
+
+if strategy.position_size < 0
+    strategy.exit("Exit Short", from_entry="Short", stop=short_stop)

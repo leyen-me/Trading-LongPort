@@ -1,0 +1,231 @@
+//@version=6
+strategy(title = "Supertrend Volume Strategy (Refined)", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 90, commission_type = strategy.commission.percent, commission_value = 0.1, pyramiding = 0, calc_on_every_tick = false, process_orders_on_close = true)
+
+// 标的 TSLA 周期 3min 夏普率 2.677 最大回撤 3.36% 盈利交易 53.06%
+
+// ===============================
+// 1. INPUTS
+// ===============================
+group_appearance   = "图表外观"
+input_highcolor    = input.color(color.red,   "顶部形态标记颜色",    group = group_appearance, inline = "colors")
+input_lowcolor     = input.color(color.green, "底部形态标记颜色",    group = group_appearance, inline = "colors")
+
+group_volume       = "成交量异动（均量倍数）"
+vol_len            = input.int(50,  "成交量均线周期", minval=2, group=group_volume)
+vol_mult           = input.float(1.5, "放大倍数（相对均量）", step=0.1, group=group_volume)
+
+group_st           = "超级趋势（SuperTrend）"
+input_atrPeriod    = input.int(12, "ATR周期", minval = 1, group=group_st)
+input_factor       = input.float(3.0, "放大系数", minval = 0.01, step = 0.01, group=group_st)
+
+group_risk         = "风险控制"
+use_st_stop        = input.bool(true,  "使用SuperTrend止损")
+input_stopLossPct  = input.float(2.5,  "固定百分比止损（备用）", minval=0.1, step=0.1)
+
+group_filters      = "交易过滤条件"
+use_trend_filter   = input.bool(true,  "启用EMA趋势过滤")
+ema_len            = input.int(230,    "EMA周期",   minval=10)
+
+group_delay          = "延迟开仓（暴涨/暴跌后）"  
+use_delay_on_surge   = input.bool(true,  "启用延迟开仓（若信号前出现过暴涨/暴跌）", group=group_delay) 
+surge_len            = input.int(6,      "暴涨/暴跌检测窗口（根数，不含当前）", minval=2, group=group_delay) 
+surge_threshold_pct  = input.float(1.4,  "暴涨/暴跌幅度阈值（%）", step=0.1, group=group_delay) 
+delay_pct            = input.float(1.2,  "回调幅度阈值（%）", step=0.1, group=group_delay) 
+max_wait_bars        = input.int(5,     "最长等待根数（超时作废）", minval=1, group=group_delay) 
+
+// ===============================
+// 2. INDICATORS
+// ===============================
+[st_val, dir]     = ta.supertrend(input_factor, input_atrPeriod)
+supertrend        = barstate.isfirst ? na : st_val
+is_uptrend        = dir ==  1
+is_downtrend      = dir == -1
+
+// 翻转
+long_flip         = ta.change(dir) < 0
+short_flip        = ta.change(dir) > 0
+
+// 量能（均量倍数，排除当根对均值的影响）
+vol_ma            = ta.sma(volume[1], vol_len)
+is_spike          = volume > vol_ma * vol_mult
+is_bull           = close > open
+is_bear           = close < open
+
+bull_spike        = is_bull and is_spike
+bear_spike        = is_bear and is_spike
+
+// 成交量过滤 
+ema200            = ta.ema(close, ema_len)
+trend_ok_long     = not use_trend_filter or (close > ema200 and open > ema200)
+trend_ok_short    = not use_trend_filter or (close < ema200 and open < ema200)
+
+// 价格行为过滤
+cur_day           = time("D")    // 当前bar所在的日期 (日级别时间戳)
+prev_day          = time("D")[1]     // 前一根bar的日期
+bars_from_open    = ta.barssince(time("D") != time("D")[1])   // 当天第几根bar
+in_open_window    = bars_from_open < 5   // 开盘前5根
+
+upper_wick          = high - math.max(open, close)
+lower_wick          = math.min(open, close) - low
+body                = math.abs(close - open)
+
+candle_ok_for_long  = upper_wick <= body   // 做多的时候上影线不要过长
+candle_ok_for_short = lower_wick <= body  // 做空的时候下影线不要过长
+
+// 盘尾不加仓过滤
+session_end   = timestamp("America/New_York", year, month, dayofmonth, 16, 0)   // 当日收盘时间 16:00
+bars_to_close = math.floor((session_end - time) / (time - time[1]))             // 距离收盘还有多少根K线
+is_last_bars  = bars_to_close < 2
+
+// 最终信号（翻转 + 量能 + 过滤）
+final_long        = long_flip   and bull_spike and trend_ok_long and candle_ok_for_long and not is_last_bars
+final_short       = short_flip  and bear_spike and trend_ok_short and candle_ok_for_short and not is_last_bars
+
+// ===============================
+// 4. ENTRY
+// ===============================
+
+bars_today     = ta.barssince(time("D") != time("D")[1]) + 1      // 当天已产生的bar数（含当前）
+effective_win  = math.max(0, math.min(surge_len, bars_today - 1)) // 窗口只在今天内，且不包含当前bar
+
+
+// 以“当前bar前一根收盘价”相对“前若干根的高/低”来衡量涨/跌幅
+// 注意：窗口=0（比如开盘第一根）时，不判定为 surge
+pre_surge = false
+if effective_win >= 1
+    prior_low   = ta.lowest(low,  effective_win + 1)
+    prior_high  = ta.highest(high, effective_win + 1)
+    // 以 close[1] 做参考，度量“向上拉升”和“向下杀跌”的幅度
+    up_change   = (close - prior_low)  / prior_low  * 100.0
+    down_change = (prior_high - close) / prior_high * 100.0
+    pre_surge   := math.max(up_change, down_change) >= surge_threshold_pct
+
+
+// ---------- 挂起信号与清理 ----------
+var bool  pending_long       = false
+var bool  pending_short      = false
+var float pending_long_ref   = na     // 触发挂起时的参考价（默认用信号bar的收盘）
+var float pending_short_ref  = na
+var int   pending_long_bar   = na     // 触发挂起的bar索引
+var int   pending_short_bar  = na
+var int   pending_long_day   = na     // 触发挂起的日时间戳（time("D")）
+var int   pending_short_day  = na
+
+// 新的一天 → 清理所有挂起，避免跨日
+if time("D") != time("D")[1]
+    pending_long      := false
+    pending_short     := false
+    pending_long_ref  := na
+    pending_short_ref := na
+    pending_long_bar  := na
+    pending_short_bar := na
+    pending_long_day  := na
+    pending_short_day := na
+
+// 若方向再次翻转（SuperTrend 反向），清掉对侧挂起
+if long_flip and pending_short
+    pending_short     := false
+    pending_short_ref := na
+    pending_short_bar := na
+    pending_short_day := na
+
+if short_flip and pending_long
+    pending_long      := false
+    pending_long_ref  := na
+    pending_long_bar  := na
+    pending_long_day  := na
+
+// 如果等待太久还没成交，也取消挂起
+if pending_long and not na(pending_long_bar) and (bar_index - pending_long_bar > max_wait_bars)
+    pending_long      := false
+    pending_long_ref  := na
+    pending_long_bar  := na
+    pending_long_day  := na
+
+if pending_short and not na(pending_short_bar) and (bar_index - pending_short_bar > max_wait_bars)
+    pending_short     := false
+    pending_short_ref := na
+    pending_short_bar := na
+    pending_short_day := na
+
+// 若已持仓，避免相反方向的挂起仍留存（防止冲突）
+if strategy.position_size > 0 and pending_short
+    pending_short     := false
+    pending_short_ref := na
+    pending_short_bar := na
+    pending_short_day := na
+if strategy.position_size < 0 and pending_long
+    pending_long      := false
+    pending_long_ref  := na
+    pending_long_bar  := na
+    pending_long_day  := na
+
+
+if final_long
+    // 仅当“信号出现前的日内窗口出现过暴涨/暴跌”才启用延迟开仓
+    if use_delay_on_surge and pre_surge
+        pending_long     := true
+        pending_long_ref := close
+        pending_long_bar := bar_index
+        pending_long_day := time("D")
+        // 不直接开仓
+    else
+        // 直接开仓（与原逻辑一致）
+        strategy.entry("Long", strategy.long, comment="做多")
+
+if final_short
+    if use_delay_on_surge and pre_surge
+        pending_short     := true
+        pending_short_ref := close
+        pending_short_bar := bar_index
+        pending_short_day := time("D")
+    else
+        strategy.entry("Short", strategy.short, comment="做空")
+
+delay_long_ok  = pending_long  and not na(pending_long_bar)  and bar_index > pending_long_bar and time("D") == pending_long_day  and low  <= pending_long_ref  * (1.0 - delay_pct/100.0)
+delay_short_ok = pending_short and not na(pending_short_bar) and bar_index > pending_short_bar and time("D") == pending_short_day and high >= pending_short_ref * (1.0 + delay_pct/100.0)
+
+// 触发挂起进场时，再次校验趋势过滤 & 盘尾不加仓
+if delay_long_ok and trend_ok_long and not is_last_bars
+    strategy.entry("Long", strategy.long, comment="延迟做多")
+    pending_long      := false
+    pending_long_ref  := na
+    pending_long_bar  := na
+    pending_long_day  := na
+
+if delay_short_ok and trend_ok_short and not is_last_bars
+    strategy.entry("Short", strategy.short, comment="延迟做空")
+    pending_short     := false
+    pending_short_ref := na
+    pending_short_bar := na
+    pending_short_day := na
+
+// ===============================
+// 4. Exit
+// ===============================
+
+// 止损：每根bar更新（重要）
+long_pct_stop   = strategy.position_avg_price * (1 - input_stopLossPct/100)
+short_pct_stop  = strategy.position_avg_price * (1 + input_stopLossPct/100)
+long_st_stop    = nz(supertrend)       // 多单用ST作为“地板”
+short_st_stop   = nz(supertrend)       // 空单用ST作为“天花板”
+
+// 选择ST止损或百分比止损（取更保守的那一个）
+long_stop       = use_st_stop ? math.max(long_pct_stop, long_st_stop)  : long_pct_stop
+short_stop      = use_st_stop ? math.min(short_pct_stop, short_st_stop): short_pct_stop
+
+if strategy.position_size > 0
+    strategy.exit("Exit Long",  from_entry="Long",  stop=long_stop, comment="做多止损")
+
+if strategy.position_size < 0
+    strategy.exit("Exit Short", from_entry="Short", stop=short_stop, comment="做空止损")
+
+
+// ===============================
+// 3. PLOTTING
+// ===============================
+plot(ema200, "ema200", color=color.purple, style=plot.style_linebr)
+plot(dir < 0 ? supertrend : na, "Up Trend",   color=color.green, style=plot.style_linebr)
+plot(dir < 0 ? na : supertrend, "Down Trend", color=color.red,   style=plot.style_linebr)
+plotshape(final_long,  "Long",  shape.triangleup,   location.belowbar, color=input_lowcolor,  size=size.small)
+plotshape(final_short, "Short", shape.triangledown, location.abovebar, color=input_highcolor, size=size.small)

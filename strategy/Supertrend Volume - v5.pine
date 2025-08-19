@@ -1,0 +1,121 @@
+//@version=6
+strategy(title = "Supertrend Volume Strategy", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.1)
+
+// =============================================================================
+// 1. INPUTS
+// =============================================================================
+
+// --- 图表颜色设置 ---
+group_appearance = "Chart Customization"
+input_highcolor  = input.color(color.red,   "Top Retracement", group = group_appearance, inline = "colors")
+input_lowcolor   = input.color(color.green, "Bottom Retracement", group = group_appearance, inline = "colors")
+
+// --- 成交量突增参数 ---
+group_volume = "Volume Spike Settings"
+input_vslength   = input.int(89, "Volume Spike Length", minval = 1, group = group_volume)
+input_multiplier = input.float(0.5, "Multiplier", minval = 0.1, step = 0.1, group = group_volume)
+
+// --- Supertrend 参数 ---
+input_atrPeriod = input.int(10, "ATR Length", minval = 1)
+input_factor    = input.float(3.0, "Factor", minval = 0.01, step = 0.01)
+
+// --- 止损参数 ---
+group_risk = "Risk Management"
+input_stopLossPercent = input.float(2.5, "Stop Loss Percent", minval = 0.1, step = 0.1, group = group_risk)
+
+
+// =============================================================================
+// 2. VOLUME SPIKE CALCULATION
+// =============================================================================
+
+// 计算历史最高成交量
+highest_volume = ta.highest(volume, input_vslength)
+
+// 标准化成交量（0-80 范围）
+abs_value = volume * 100 / highest_volume * 0.8  // 等价于 * 4 / 5
+
+// 平滑处理
+smoothed = ta.ema(abs_value, 21)
+deviation = abs_value - smoothed
+
+// 动态阈值：取历史最大偏离值的一部分
+threshold = ta.highest(deviation, input_vslength) * input_multiplier
+
+// 判断是否为放量K线
+is_volume_spike = deviation > 0 and deviation >= threshold
+
+// 判断K线方向
+is_bearish = close < open
+is_bullish = close > open
+
+// 成交量突增 + 方向组合
+is_bear_volume_spike = is_bearish and is_volume_spike
+is_bull_volume_spike = is_bullish and is_volume_spike
+
+
+// =============================================================================
+// 3. SUPERTREND LOGIC
+// =============================================================================
+
+[supertrend_val, direction] = ta.supertrend(input_factor, input_atrPeriod)
+
+// 处理首根K线为NaN
+supertrend = barstate.isfirst ? na : supertrend_val
+
+// 趋势方向信号
+is_uptrend = direction == 1
+is_downtrend = direction == -1
+
+// 趋势反转信号
+long_entry_signal  = ta.change(direction) < 0
+short_entry_signal = ta.change(direction) > 0
+
+
+// =============================================================================
+// 4. COMBINED TRADING SIGNALS
+// =============================================================================
+
+final_long_signal  = long_entry_signal  and is_bull_volume_spike
+final_short_signal = short_entry_signal and is_bear_volume_spike
+
+
+// =============================================================================
+// 5. PLOTTING
+// =============================================================================
+
+// 绘制 Supertrend 走势
+plot(is_uptrend ? supertrend : na, "Up Trend", color.green, style = plot.style_linebr)
+plot(is_downtrend ? supertrend : na, "Down Trend", color.red, style = plot.style_linebr)
+
+// 绘制交易信号
+plotshape(final_long_signal,  title = "Long Signal", style = shape.triangleup,   location = location.belowbar, color = input_lowcolor, size = size.small)
+plotshape(final_short_signal, title = "Short Signal", style = shape.triangledown, location = location.abovebar, color = input_highcolor, size = size.small)
+
+// （可选）绘制成交量突增标记
+// plotshape(is_bull_volume_spike, "", shape.circle, location.bottom, color = input_lowcolor, size = size.tiny, editable = false)
+// plotshape(is_bear_volume_spike, "", shape.circle, location.top,    color = input_highcolor, size = size.tiny, editable = false)
+
+
+// =============================================================================
+// 6. STRATEGY EXECUTION
+// =============================================================================
+
+long_stop_price  = strategy.position_avg_price * (1 - input_stopLossPercent / 100)
+short_stop_price = strategy.position_avg_price * (1 + input_stopLossPercent / 100)
+
+// --- 做多 ---
+if final_long_signal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", from_entry = "Long", stop = long_stop_price, comment = "Long Stop Loss")
+
+// --- 做空 ---
+if final_short_signal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", from_entry = "Short", stop = short_stop_price,comment = "Short Stop Loss")
+
+// --- 反向信号平仓（趋势反转时平仓）---
+if strategy.position_size > 0 and short_entry_signal
+    strategy.close("Long", comment = "Exit Long on Trend Reversal")
+
+if strategy.position_size < 0 and long_entry_signal
+    strategy.close("Short", comment = "Exit Short on Trend Reversal")
