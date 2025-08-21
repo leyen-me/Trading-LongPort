@@ -10,6 +10,7 @@ use longport::{
     },
 };
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -281,6 +282,15 @@ async fn buy(
     quote_ctx: &QuoteContext,
     symbol: &str,
 ) -> Result<(), TradingError> {
+    
+    let max_purchase_ratio: f64 = env::var("MAX_PURCHASE_RATIO")
+        .unwrap_or_else(|_| "0.5".to_string())  // 如果没有设置环境变量，默认是 0.5
+        .parse()
+        .unwrap_or(0.5);
+    let purchase_ratio = decimal!(max_purchase_ratio);
+
+    info!(max_purchase_ratio);
+
     let current_price = get_ask_price(quote_ctx, symbol)
         .await
         .ok_or(TradingError::QuoteError("无法获取卖一价".to_string()))?;
@@ -296,7 +306,7 @@ async fn buy(
         .await
         .map_err(|e| TradingError::SDKError(e.to_string()))?;
 
-    let quantity = (max_buy_resp.cash_max_qty * decimal!(0.9)).trunc();
+    let quantity = (max_buy_resp.cash_max_qty * purchase_ratio).trunc();
 
     if quantity < decimal!(1) {
         warn!(symbol, "可买数量不足（{}），取消买入", quantity);
