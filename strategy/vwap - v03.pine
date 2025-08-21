@@ -1,0 +1,131 @@
+//@version=5
+//@strategy_author Leyen
+//@description 
+//@description VWAP 策略 v2
+//@description 
+//@description 基于高级别时间周期（如周线）的 VWAP 作为动态支撑/阻力位进行交易。
+//@description 当价格上穿或下穿 VWAP 时触发多空信号，结合 ATR 设置止盈止损与移动止损。
+//@description 
+//@description 🔁 版本更新日志：
+//@description 
+//@description v2 (2025-08-13)：
+//@description   • 【核心优化】将 new_session 判断从 request.security 改为 time(tf_vwap)
+//@description     - 防止重绘：旧方法在跨周期请求 time 时可能导致历史信号跳变
+//@description     - 更稳定：避免 security 调用带来的异步/延迟/映射问题
+//@description     - 更高效：无需跨品种请求，降低资源消耗
+//@description     - 推荐做法：符合 Pine Script v5 多时间框架最佳实践
+//@description   • 特别适用于实盘交易与回测一致性要求高的场景
+//@description 
+//@description 🛠 策略特性：
+//@description   • 支持自定义高级别 VWAP 周期（默认：周线）
+//@description   • 支持多单与空单开关控制
+//@description   • 基于 ATR 的止盈、止损与移动止损机制
+//@description   • 可视化 VWAP 线、信号标记与 K 线着色
+//@description 
+//@description 📊 使用建议：
+//@description   • 推荐时间周期：4小时及以上
+//@description   • 适用市场：高波动资产（如 TLSA、Meme 币等）
+//@description   • 风险提示：ATR 倍数设置过高或过低可能影响盈亏比，请根据品种波动性调整
+//@description 
+//@description 💬 联系方式：6772228275@qq.com
+//@link https://github.com/leyen-me/VWAP
+
+
+strategy("vwap-v3",
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1,
+     pyramiding=1,
+     calc_on_every_tick = true)
+
+
+// =======================
+// 输入参数
+// =======================
+
+// 高级别 VWAP 计算周期
+tf_vwap = input.timeframe("W", "VWAP 高级别周期")
+
+// 止盈止损（基于 ATR）
+trail_mult = input.float(2, "移动止损倍数 (ATR)", minval=0.1)
+atr_len   = input.int(14, "ATR 长度")
+
+// =======================
+// 多时间框架 VWAP 计算
+// =======================
+
+// 记录高级别周期的起点时间
+session_start = request.security(syminfo.tickerid, tf_vwap, time)
+new_session   = ta.change(session_start) != 0
+
+// 累积计算 VWAP
+var float sum_pv   = na  // price * volume 累积
+var float sum_vol  = na  // volume 累积
+var float sum_p2v  = na  // price^2 * volume 累积（可扩展）
+
+if new_session
+    sum_pv  := hl2 * volume
+    sum_vol := volume
+    sum_p2v := hl2 * hl2 * volume
+else
+    sum_pv  += hl2 * volume
+    sum_vol += volume
+    sum_p2v += hl2 * hl2 * volume
+
+// 当前 VWAP
+vwap = sum_vol > 0 ? sum_pv / sum_vol : na
+
+// 上周期 VWAP（仅在新周期记录）
+var float prev_vwap = na
+if new_session
+    prev_vwap := vwap[1]
+
+
+// =======================
+// 交易信号 & 止盈止损计算
+// =======================
+
+// ATR 计算
+atr_val = ta.atr(atr_len)
+
+// 信号条件
+long_signal  = ta.crossover(close, vwap)   and not new_session
+short_signal = ta.crossunder(close, vwap)  and not new_session
+
+// =======================
+// 交易执行（手动止盈止损版）
+// =======================
+
+// 记录止损变量
+var float long_stop  = na
+var float short_stop = na
+
+if long_signal
+    strategy.entry("Long", strategy.long)
+    // 初始止损（开仓价 - ATR倍数）
+    long_stop := close - atr_val * trail_mult
+
+if short_signal
+    strategy.entry("Short", strategy.short)
+    // 初始止损（开仓价 + ATR倍数）
+    short_stop := close + atr_val * trail_mult
+
+// 多单持仓时，更新移动止损
+if strategy.position_size > 0
+    long_stop := math.max(long_stop, close - atr_val * trail_mult)
+    if close < long_stop
+        strategy.close("Long", comment="Long Stop Hit")
+
+// 空单持仓时，更新移动止损
+if strategy.position_size < 0
+    short_stop := math.min(short_stop, close + atr_val * trail_mult)
+    if close > short_stop
+        strategy.close("Short", comment="Short Stop Hit")
+
+// =======================
+// 绘图
+// =======================
+plot(vwap, "VWAP",  color = close > vwap ? color.green : color.red, linewidth = 1, style = plot.style_linebr)

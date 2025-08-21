@@ -1,0 +1,74 @@
+//@version=4
+strategy("RSI VWAP", overlay=true, default_qty_type=strategy.percent_of_equity, initial_capital = 10000, pyramiding = 1, default_qty_value = 90, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = false, process_orders_on_close = true)
+
+
+//AO
+fast=input(title="Fast Length",type=input.integer,defval=5)
+slow=input(title="Slow length",type=input.integer,defval=34)
+
+awesome=(sma(hl2,fast)-sma(hl2,slow))*1000
+
+plot(awesome, style=plot.style_histogram, color=(awesome>awesome[1]?color.green:color.red))
+
+//Stoch
+
+K=input(title="K",type=input.integer,defval=14)
+D=input(title="D",type=input.integer,defval=3)
+smooth=input(title="smooth",type=input.integer,defval=3)
+
+k=sma(stoch(close,high,low,K),D)
+d=sma(k,smooth)
+
+hline(80)
+hline(20)
+
+plot(k,color=color.blue)
+
+//RSI
+
+rsisource=input(title="rsi source",type=input.source,defval=close)
+rsilength=input(title="rsi length",type=input.integer,defval=10)
+
+rsi=rsi(rsisource,rsilength)
+
+hline(70,color=color.orange)
+hline(30,color=color.orange)
+
+plot(rsi,color=color.orange)
+
+//ATR
+
+atrlen=input(title="ATR Length", type=input.integer,defval=14)
+
+atrvalue=rma(tr,atrlen)
+
+plot(atrvalue*1000,color=color.green)
+
+LongCondition=k<20 and rsi<30 and awesome>awesome[1]
+ShortCondition=k>80 and rsi>70 and awesome<awesome[1]
+
+
+group_risk         = "风险控制"
+input_stop_loss_pct  = input.float(3.8,  "固定百分比止损", minval=0.1, step=0.1, group=group_risk)
+input_stop_limit_atr  = input.float(3.1,  "ATR 止盈倍数", minval=0.1, step=0.1, group=group_risk)
+
+
+long_pct_stop   = strategy.position_avg_price * (1 - input_stop_loss_pct / 100)
+short_pct_stop  = strategy.position_avg_price * (1 + input_stop_loss_pct / 100)
+
+if LongCondition
+    strategy.entry("Long", strategy.long)
+    long_atr_limit_price := strategy.position_avg_price - atrvalue * input_stop_limit_atr
+
+if ShortCondition
+    strategy.entry("Short", strategy.short)
+    short_atr_limit_price := strategy.position_avg_price + atrvalue * input_stop_limit_atr
+
+// === 移动止盈 ===
+if strategy.position_size > 0
+    long_atr_limit_price := math.max(long_atr_limit_price, close - atrvalue * input_stop_limit_atr)
+    strategy.exit("Exit Long",  from_entry="Long",  stop=long_pct_stop, limit=long_atr_limit_price, comment="做多固定止损")
+
+if strategy.position_size < 0
+    short_atr_limit_price := math.min(short_atr_limit_price, close + atrvalue * input_stop_limit_atr)
+    strategy.exit("Exit Short", from_entry="Short", stop=short_pct_stop, limit=short_atr_limit_price, comment="做空固定止损")

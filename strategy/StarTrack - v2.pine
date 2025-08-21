@@ -1,0 +1,135 @@
+//@version=6
+strategy(title = "StarTrack", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 90, commission_type = strategy.commission.percent, commission_value = 0.1, pyramiding = 0, calc_on_every_tick = false, process_orders_on_close = true)
+
+// 15min 
+
+// =============================================================================
+// 公共函数
+// =============================================================================
+
+ma(source, length, _type) =>
+    switch _type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+// =============================================================================
+// 全局变量
+// =============================================================================
+
+green_color = color.new(#089981, 0)
+red_color = color.new(#F23645, 0)
+
+transparent_color_upper = color.new(#F23645, 70)  // 红色，70% 透明
+transparent_color_lower = color.new(#089981, 70)  // 绿色，70% 透明
+transparent_color_basis = color.new(#2962FF, 70)  // 蓝色，70% 透明
+transparent_color_gap   = color.new(#2196F3, 95)  // 蓝色，95% 透明
+
+// =============================================================================
+// 指标设置 (Indicator Settings)
+// =============================================================================
+
+// 布林线指标设置
+bb_group            = "布林带参数"
+bb_ma_type          = input.string("SMA", "移动平均线类型", options = ["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group=bb_group)
+bb_length           = input.int(20, "布林带周期", minval=1, group=bb_group)
+bb_mult             = input.float(2.0, "标准差乘数", minval=0.001, maxval=50, group=bb_group)
+
+// 成交量激增放量回撤指标设置
+volspir_group       = "成交量激增放量回撤"
+
+volspir_vslength    = input.int(defval=100,            title='成交量激增周期长度', minval=1,                              group='成交量激增设置')
+volspir_multiplier  = input.float(defval=0.8,         title='倍数',          minval=0.1, step=.1,                   group='成交量激增设置')
+
+group_st           = "超级趋势（SuperTrend）"
+input_atrPeriod    = input.int(12, "ATR周期", minval = 1, group=group_st)
+input_factor       = input.float(3.4, "放大系数", minval = 0.01, step = 0.01, group=group_st)
+
+group_risk         = "风险控制"
+use_st_stop        = input.bool(true,  "使用SuperTrend止损")
+input_stopLossPct  = input.float(2.5,  "固定百分比止损（备用）", minval=0.1, step=0.1)
+
+// =============================================================================
+// 计算部分 (Calculation Logic)
+// =============================================================================
+
+// 布林线计算
+bb_basis = ma(close, bb_length, bb_ma_type)
+bb_dev   = bb_mult * ta.stdev(close, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+bb_price_touch_lower = high <= bb_lower  // 价格触及下轨
+bb_price_below_lower = close > bb_lower  // 收盘价突破下轨（下跌趋势减弱）
+
+bb_price_touch_upper = high >= bb_upper  // 价格触及上轨
+bb_price_below_upper = close < bb_upper  // 收盘价跌破上轨（上涨趋势减弱）
+bb_price_cross_mid_up = ta.crossover(close, bb_basis)  // 回踩中轨后回升
+bb_price_cross_mid_down = ta.crossunder(close, bb_basis)  // 跌破中轨
+
+
+// 成交量激增放量回撤计算
+volspir_hvs       = ta.highest(volume, volspir_vslength)
+volspir_abs       = volume * 100 / volspir_hvs * 4 / 5
+volspir_smoothing = ta.ema(volspir_abs, 21)
+volspir_equal     = volspir_abs - volspir_smoothing
+volspir_limit     = ta.highest(volspir_equal, volspir_vslength) * volspir_multiplier
+volspir_cum       = volspir_equal > 0 and volspir_equal >= volspir_limit
+volspir_beardir   = close < open
+volspir_bulldir   = close > open
+volspir_bearvol     = volspir_beardir and volspir_cum ? true : false
+volspir_bullvol     = volspir_bulldir and volspir_cum ?  true : false
+volspir_bearbccolor = volspir_bearvol ? red_color  : na
+volspir_bullbccolor = volspir_bullvol ? green_color   : na
+
+var float volspir_bearvolprice = na
+if volspir_bearvol
+    volspir_bearvolprice := high
+    volspir_bearvolprice
+var float volspir_bullvolprice = na
+if volspir_bullvol
+    volspir_bullvolprice := low
+    volspir_bullvolprice
+
+// SuperTrend 计算
+[st_val, dir]     = ta.supertrend(input_factor, input_atrPeriod)
+supertrend        = barstate.isfirst ? na : st_val
+
+// =============================================================================
+// 绘制
+// =============================================================================
+
+// 布林带绘制
+bb_basis_p = plot(bb_basis, "布林线", color=transparent_color_basis, linewidth=1) // 中轨
+bb_upper_p = plot(bb_upper, "布林线上轨", color=transparent_color_upper, linewidth=1) // 上轨
+bb_lower_p = plot(bb_lower, "布林线下轨", color=transparent_color_lower, linewidth=1) // 下轨
+fill(bb_upper_p, bb_lower_p, title = "布林带", color=transparent_color_gap)  // 两个轨道之间
+
+// 成交量激增放量回撤绘制
+plotshape(volspir_bearvol, title='看跌成交量激增', style=shape.triangledown, location=location.abovebar, color=color.new(red_color, 0), size=size.tiny)
+plotshape(volspir_bullvol, title='看涨成交量激增', style=shape.triangleup,   location=location.belowbar, color=color.new(green_color,  0), size=size.tiny)
+barcolor(volspir_bearbccolor)
+barcolor(volspir_bullbccolor)
+
+long_pct_stop   = strategy.position_avg_price * (1 - input_stopLossPct/100)
+short_pct_stop  = strategy.position_avg_price * (1 + input_stopLossPct/100)
+long_st_stop    = nz(supertrend)
+short_st_stop   = nz(supertrend)
+
+long_stop       = use_st_stop ? math.max(long_pct_stop, long_st_stop)  : long_pct_stop
+short_stop      = use_st_stop ? math.min(short_pct_stop, short_st_stop): short_pct_stop
+
+
+if volspir_bullvol
+    strategy.entry("Long", strategy.long, comment="做多")
+
+if volspir_bearvol
+    strategy.entry("Short", strategy.short, comment="做空")
+
+if strategy.position_size > 0
+    strategy.exit("Exit Long",  from_entry="Long",  stop=long_stop, comment="做多止损")
+
+if strategy.position_size < 0
+    strategy.exit("Exit Short", from_entry="Short", stop=short_stop, comment="做空止损")

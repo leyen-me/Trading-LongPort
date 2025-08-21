@@ -1,0 +1,69 @@
+// TLSA 1H 夏普率 0.442
+// 它的使命是让你“不错过大趋势”，而不是“抓住每一个波段”。接受它滞后和回撤的特性，用风控和过滤机制来扬长避短，才能稳定盈利。
+
+// 未来的目标：捕捉大趋势，过滤小趋势
+//           回调入场机制，买在回踩斐波那契38.2%
+
+
+// 强趋势不会回踩，弱趋势回踩没用
+// 弱趋势，回踩不破 + SuperTrend 仍为多
+// 趋势强时重仓，震荡时轻仓或空仓。
+// 固定止损或者前低，移动止盈
+
+//@version=6
+strategy("Supertrend X", overlay=true, default_qty_type=strategy.percent_of_equity, initial_capital = 10000, pyramiding = 1, default_qty_value = 90, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = false, process_orders_on_close = true)
+
+// 设置
+group_supertrend         = "风险控制"
+atr_period = input(7, "high ATR Length", group=group_supertrend)
+factor = input.float(2.1, "high Factor", step = 0.01, group=group_supertrend)
+
+group_risk         = "风险控制"
+input_stop_loss_pct  = input.float(3.8,  "固定百分比止损", minval=0.1, step=0.1, group=group_risk)
+input_stop_limit_atr  = input.float(3.1,  "ATR 止盈倍数", minval=0.1, step=0.1, group=group_risk)
+
+// 计算
+[supertrend, direction] = ta.supertrend(factor, atr_period)
+atr_val = ta.atr(atr_period)
+supertrend := barstate.isfirst ? na : supertrend
+
+long_signal = ta.change(direction) < 0
+short_signal = ta.change(direction) > 0
+
+// 仓位
+var float long_atr_limit_price = 0
+var float short_atr_limit_price = 0
+
+if long_signal
+    strategy.entry("Long", strategy.long)
+    long_atr_limit_price := strategy.position_avg_price - atr_val * input_stop_limit_atr
+
+if short_signal
+    strategy.entry("Short", strategy.short)
+    short_atr_limit_price := strategy.position_avg_price + atr_val * input_stop_limit_atr
+
+// 风险
+long_pct_stop   = strategy.position_avg_price * (1 - input_stop_loss_pct / 100)
+short_pct_stop  = strategy.position_avg_price * (1 + input_stop_loss_pct / 100)
+
+// === 移动止盈 ===
+if strategy.position_size > 0
+    // 多单移动止盈（随价格上移）
+    long_atr_limit_price := math.max(long_atr_limit_price, close - atr_val * input_stop_limit_atr)
+    if close < long_atr_limit_price
+        strategy.close("Long", comment="做多移动止盈")
+    strategy.exit("Exit Long",  from_entry="Long",  stop=long_pct_stop, comment="做多固定止损")
+
+if strategy.position_size < 0
+    // 空单移动止盈（随价格下移）
+    short_atr_limit_price := math.min(short_atr_limit_price, close + atr_val * input_stop_limit_atr)
+    if close > short_atr_limit_price
+        strategy.close("Short", comment="做空移动止盈")
+    strategy.exit("Exit Short", from_entry="Short", stop=short_pct_stop, comment="做空固定止损")
+
+// 绘制
+upTrend =    plot(direction < 0 ? supertrend : na, "Up Trend",   color = color.green, style = plot.style_linebr)
+downTrend =  plot(direction < 0 ? na : supertrend, "Down Trend", color = color.red,   style = plot.style_linebr)
+bodyMiddle = plot(barstate.isfirst ? na : (open + close) / 2, "Body Middle",display = display.none)
+fill(bodyMiddle, upTrend,   title = "Uptrend background",   color = color.new(color.green, 90), fillgaps = false)
+fill(bodyMiddle, downTrend, title = "Downtrend background", color = color.new(color.red,   90), fillgaps = false)
