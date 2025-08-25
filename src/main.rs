@@ -282,9 +282,8 @@ async fn buy(
     quote_ctx: &QuoteContext,
     symbol: &str,
 ) -> Result<(), TradingError> {
-    
     let max_purchase_ratio: f64 = env::var("MAX_PURCHASE_RATIO")
-        .unwrap_or_else(|_| "0.5".to_string())  // 如果没有设置环境变量，默认是 0.5
+        .unwrap_or_else(|_| "0.5".to_string()) // 如果没有设置环境变量，默认是 0.5
         .parse()
         .unwrap_or(0.5);
     let purchase_ratio = decimal!(max_purchase_ratio);
@@ -306,7 +305,7 @@ async fn buy(
         .await
         .map_err(|e| TradingError::SDKError(e.to_string()))?;
 
-    let quantity = (max_buy_resp.cash_max_qty * purchase_ratio).trunc();
+    let quantity = (max_buy_resp.margin_max_qty * purchase_ratio).trunc();
 
     if quantity < decimal!(1) {
         warn!(symbol, "可买数量不足（{}），取消买入", quantity);
@@ -380,11 +379,19 @@ async fn sell(
     symbol: &str,
     quantity: Decimal,
 ) -> Result<(), TradingError> {
+
+    let max_sell_ratio: f64 = env::var("MAX_SELL_RATIO")
+        .unwrap_or_else(|_| "0.5".to_string()) // 如果没有设置环境变量，默认是 0.5
+        .parse()
+        .unwrap_or(0.5);
+    let sell_ratio = decimal!(max_sell_ratio);
+    let target_quantity = (quantity * sell_ratio).trunc();
+
     sell_with_retry(
         trade_ctx,
         quote_ctx,
         symbol,
-        quantity,
+        target_quantity,
         5, // 最多重试 5 次
         Duration::from_secs(10),
     )
