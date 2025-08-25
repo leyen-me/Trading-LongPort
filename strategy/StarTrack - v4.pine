@@ -1,0 +1,162 @@
+//@version=6
+strategy(title = "StarTrack", overlay = true, initial_capital = 999999999, default_qty_type = strategy.percent_of_equity, pyramiding = 100, default_qty_value = 1, commission_type = strategy.commission.percent, commission_value = 0, calc_on_every_tick = false, process_orders_on_close = true)
+
+
+// =============================================================================
+// 全局固定
+// =============================================================================
+RSI_LENGTH = 14
+MIN_PEAK_STRENGTH = 2
+BB_LENGTH = 20
+BB_MULTIPLIER = 2
+
+// =============================================================================
+// 公共函数
+// =============================================================================
+
+ma(source, length, _type) =>
+    switch _type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+// =============================================================================
+// 全局变量
+// =============================================================================
+
+green_color = color.new(#089981, 0)
+red_color = color.new(#F23645, 0)
+
+transparent_color_upper = color.new(#F23645, 70)  // 红色，70% 透明
+transparent_color_lower = color.new(#089981, 70)  // 绿色，70% 透明
+transparent_color_basis = color.new(#2962FF, 70)  // 蓝色，70% 透明
+transparent_color_gap   = color.new(#2196F3, 95)  // 蓝色，95% 透明
+
+// =============================================================================
+// 指标设置 (Indicator Settings)
+// =============================================================================
+
+// 布林线指标设置
+rsi_group            = "RSI 设置"
+rsi_oversold = input.int(30, title="超卖水平", minval=0, maxval=100, group=rsi_group)
+rsi_overbought = input.int(70, title="超买水平", minval=0, maxval=100, group=rsi_group)
+
+bb_group            = "布林带参数"
+bb_ma_type          = input.string("SMA", "移动平均线类型", options = ["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group=bb_group)
+bb_length           = input.int(20, "布林带周期", minval=1, group=bb_group)
+bb_mult             = input.float(2.0, "标准差乘数", minval=0.001, maxval=50, group=bb_group)
+
+group_st           = "超级趋势（SuperTrend）"
+input_atrPeriod    = input.int(10, "ATR周期", minval = 1, group=group_st)
+input_factor       = input.float(2.1, "放大系数", minval = 0.01, step = 0.01, group=group_st)
+
+// 冷却参数
+cooldown_bars = input.int(10, "信号冷却周期（根K线）", minval=1, maxval=50, group="风险管理")
+
+// =============================================================================
+// 计算部分 (Calculation Logic)
+// =============================================================================
+
+// 布林线计算
+bb_basis = ma(close, bb_length, bb_ma_type)
+bb_dev   = bb_mult * ta.stdev(close, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+bb_price_touch_lower = low <= bb_lower  // 价格触及下轨
+bb_price_below_lower = close > bb_lower  // 收盘价突破下轨（下跌趋势减弱）
+
+bb_price_touch_upper = high >= bb_upper  // 价格触及上轨
+bb_price_below_upper = close < bb_upper  // 收盘价跌破上轨（上涨趋势减弱）
+bb_price_cross_mid_up = ta.crossover(close, bb_basis)  // 回踩中轨后回升
+bb_price_cross_mid_down = ta.crossunder(close, bb_basis)  // 跌破中轨
+
+bb_buy_signal = bb_price_touch_lower and bb_price_below_lower
+bb_sell_signal = bb_price_touch_upper and bb_price_below_upper
+
+// SuperTrend 计算
+[st_val, dir]     = ta.supertrend(input_factor, input_atrPeriod)
+supertrend        = barstate.isfirst ? na : st_val
+
+// =============================================================================
+// RSI 计算部分
+// =============================================================================
+// 计算 RSI 值
+rsi0 = ta.rsi(close, RSI_LENGTH)
+rsi1 = ta.change(rsi0, 1)
+rsi2 = ta.change(rsi0, 2)
+
+rsi_is_peak = ta.falling(rsi0, MIN_PEAK_STRENGTH) and rsi0 >= rsi_overbought  // 检测超买区域的峰值
+rsi_is_dip = ta.rising(rsi0, MIN_PEAK_STRENGTH) and rsi0 <= rsi_oversold      // 检测超卖区域的谷值
+rsi_cross_oversold = ta.crossover(rsi0, rsi_oversold)      // RSI 向上穿越超卖线
+rsi_cross_under_bought = ta.crossunder(rsi0, rsi_overbought) // RSI 向下穿越超买线
+
+rsi_buy_signal = (rsi_is_dip and rsi1 > 0 and rsi2 > 0) or rsi_cross_oversold
+rsi_sell_signal = (rsi_is_peak and rsi1 < 0 and rsi2 < 0) or rsi_cross_under_bought
+
+// =============================================================================
+// 复合信号（原逻辑）
+// =============================================================================
+
+max_gap = 2
+bb_bought_recently = ta.barssince(bb_buy_signal) <= max_gap
+rsi_bought_recently = ta.barssince(rsi_buy_signal) <= max_gap
+buy_signal_raw = bb_bought_recently and rsi_bought_recently and (bb_buy_signal or rsi_buy_signal)
+
+bb_sold_recently = ta.barssince(bb_sell_signal) <= max_gap
+rsi_sold_recently = ta.barssince(rsi_sell_signal) <= max_gap
+sell_signal_raw = bb_sold_recently and rsi_sold_recently and (bb_sell_signal or rsi_sell_signal)
+
+// =============================================================================
+// 🔥 冷却机制 + 状态管理
+// =============================================================================
+
+var int last_buy_trade_bar = na
+var int last_sell_trade_bar = na
+
+// 判断是否处于冷却期
+is_buy_cooldown() =>
+    not na(last_buy_trade_bar) and (bar_index - last_buy_trade_bar) < cooldown_bars
+
+is_sell_cooldown() =>
+    not na(last_sell_trade_bar) and (bar_index - last_sell_trade_bar) < cooldown_bars
+
+can_enter_long = buy_signal_raw and not is_buy_cooldown()
+should_exit_long = sell_signal_raw and not is_sell_cooldown()
+
+// =============================================================================
+// 交易
+// =============================================================================
+
+if can_enter_long
+    strategy.entry("Long", strategy.long, comment="做多")
+    last_buy_trade_bar := bar_index
+
+if should_exit_long
+    strategy.close("Long", qty_percent = 1)
+    last_sell_trade_bar := bar_index
+
+// =============================================================================
+// 绘制
+// =============================================================================
+
+// 布林带绘制
+bb_basis_p = plot(bb_basis, "布林线", color=transparent_color_basis, linewidth=1) // 中轨
+bb_upper_p = plot(bb_upper, "布林线上轨", color=transparent_color_upper, linewidth=1) // 上轨
+bb_lower_p = plot(bb_lower, "布林线下轨", color=transparent_color_lower, linewidth=1) // 下轨
+fill(bb_upper_p, bb_lower_p, title = "布林带", color=transparent_color_gap)  // 两个轨道之间
+
+// supertrend
+upTrend =    plot(dir < 0 ? supertrend : na, "Up Trend",   color = color.green, style = plot.style_linebr)
+downTrend =  plot(dir < 0 ? na : supertrend, "Down Trend", color = color.red,   style = plot.style_linebr)
+bodyMiddle = plot(barstate.isfirst ? na : (open + close) / 2, "Body Middle",display = display.none)
+fill(bodyMiddle, upTrend,   title = "Uptrend background",   color = color.new(color.green, 90), fillgaps = false)
+fill(bodyMiddle, downTrend, title = "Downtrend background", color = color.new(color.red,   90), fillgaps = false)
+
+plotshape(can_enter_long, title='实际买入', style=shape.triangleup,   location=location.belowbar, color=color.new(green_color,  0), size=size.tiny)
+plotshape(should_exit_long, title='实际卖出', style=shape.triangledown, location=location.abovebar, color=color.new(red_color, 0), size=size.tiny)
+
+plotshape(buy_signal_raw, title='买入', style=shape.triangleup,   location=location.belowbar, color=color.new(green_color,  50), size=size.tiny)
+plotshape(sell_signal_raw, title='卖出', style=shape.triangledown, location=location.abovebar, color=color.new(red_color, 50), size=size.tiny)
