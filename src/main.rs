@@ -482,6 +482,10 @@ async fn webhook_handler(
             info!("信号=开多仓");
             do_long(&state).await?;
         }
+        (Action::Sell, Sentiment::Long) => {
+            info!("信号=平多头");
+            do_close_position(&state).await?;
+        }
         (Action::Sell, Sentiment::Short) => {
             info!("信号=开空仓");
             do_short(&state).await?;
