@@ -1,0 +1,290 @@
+//@version=6
+strategy(title = "【破晓者 Pro·地狱制裁版】⚡TSLL ONLY", overlay = true, 
+         default_qty_type = strategy.percent_of_equity, default_qty_value = 50, 
+         commission_type = strategy.commission.percent, commission_value = 0.01,
+         calc_on_every_tick = false, process_orders_on_close = true, pyramiding = 1)
+
+// =============================================================================
+// 公共函数
+// =============================================================================
+
+ma(source, length, _type) =>
+    switch _type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+// =============================================================================
+// 全局变量
+// =============================================================================
+
+green_color = color.new(#089981, 0)
+red_color = color.new(#F23645, 0)
+
+transparent_color_upper = color.new(#F23645, 70)  // 红色，70% 透明
+transparent_color_lower = color.new(#089981, 70)  // 绿色，70% 透明
+transparent_color_basis = color.new(#2962FF, 70)  // 蓝色，70% 透明
+transparent_color_gap   = color.new(#2196F3, 95)  // 蓝色，95% 透明
+
+// =============================================================================
+// 指标设置 (Indicator Settings)
+// =============================================================================
+
+RSI_LENGTH = 14
+MIN_PEAK_STRENGTH = 2
+BB_LENGTH = 20
+BB_MULTIPLIER = 2
+
+int     OPEN_MINUTES     = input.int(30, "🔥 开盘动能窗口", minval=15, maxval=60)
+float   VOL_MULT         = input.float(2, "💥 脉冲放量阈值", minval=1.5, step=0.1, maxval=4.0)
+int     ATR_LEN          = input.int(14, "🌀 ATR周期", minval=5)
+float   ATR_SL_MULT      = input.float(5.7, "💀 止损倍数", minval=0.5, step=0.1)
+float   ATR_TP_MULT      = input.float(6.8, "🎯 止盈倍数", minval=0.5, step=0.1)
+
+bool    USE_VOL_SPIKE    = input.bool(true, "⚡ 启用成交量脉冲过滤")
+bool    DEBUG_MODE       = input.bool(false, "🐞 调试模式（显示内部变量）")
+
+// 布林线指标设置
+rsi_group            = "RSI 设置"
+rsi_oversold = input.int(30, title="超卖水平", minval=0, maxval=100, group=rsi_group)
+rsi_overbought = input.int(70, title="超买水平", minval=0, maxval=100, group=rsi_group)
+
+bb_group            = "布林带参数"
+bb_ma_type          = input.string("SMA", "移动平均线类型", options = ["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group=bb_group)
+bb_length           = input.int(20, "布林带周期", minval=1, group=bb_group)
+bb_mult             = input.float(2.0, "标准差乘数", minval=0.001, maxval=50, group=bb_group)
+
+// =============================================================================
+// 计算部分 (Calculation Logic)
+// =============================================================================
+
+// 布林线计算
+bb_basis = ma(close, bb_length, bb_ma_type)
+bb_dev   = bb_mult * ta.stdev(close, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+bb_price_touch_lower = low <= bb_lower  // 价格触及下轨
+bb_price_below_lower = close > bb_lower  // 收盘价突破下轨（下跌趋势减弱）
+
+bb_price_touch_upper = high >= bb_upper  // 价格触及上轨
+bb_price_below_upper = close < bb_upper  // 收盘价跌破上轨（上涨趋势减弱）
+bb_price_cross_mid_up = ta.crossover(close, bb_basis)  // 回踩中轨后回升
+bb_price_cross_mid_down = ta.crossunder(close, bb_basis)  // 跌破中轨
+
+bb_buy_signal = bb_price_touch_lower and bb_price_below_lower
+bb_sell_signal = bb_price_touch_upper and bb_price_below_upper
+
+// =============================================================================
+// RSI 计算部分
+// =============================================================================
+// 计算 RSI 值
+rsi0 = ta.rsi(close, RSI_LENGTH)
+rsi1 = ta.change(rsi0, 1)
+rsi2 = ta.change(rsi0, 2)
+
+rsi_is_peak = ta.falling(rsi0, MIN_PEAK_STRENGTH) and rsi0 >= rsi_overbought  // 检测超买区域的峰值
+rsi_is_dip = ta.rising(rsi0, MIN_PEAK_STRENGTH) and rsi0 <= rsi_oversold      // 检测超卖区域的谷值
+rsi_cross_oversold = ta.crossover(rsi0, rsi_oversold)      // RSI 向上穿越超卖线
+rsi_cross_under_bought = ta.crossunder(rsi0, rsi_overbought) // RSI 向下穿越超买线
+
+rsi_buy_signal = (rsi_is_dip and rsi1 > 0 and rsi2 > 0) or rsi_cross_oversold
+rsi_sell_signal = (rsi_is_peak and rsi1 < 0 and rsi2 < 0) or rsi_cross_under_bought
+
+// =============================================================================
+// 复合信号（原逻辑）
+// =============================================================================
+
+max_gap = 2
+bb_bought_recently = ta.barssince(bb_buy_signal) <= max_gap
+rsi_bought_recently = ta.barssince(rsi_buy_signal) <= max_gap
+buy_signal_raw = bb_bought_recently and rsi_bought_recently and (bb_buy_signal or rsi_buy_signal)
+
+bb_sold_recently = ta.barssince(bb_sell_signal) <= max_gap
+rsi_sold_recently = ta.barssince(rsi_sell_signal) <= max_gap
+sell_signal_raw = bb_sold_recently and rsi_sold_recently and (bb_sell_signal or rsi_sell_signal)
+
+// =============================================================================
+// 🌆 美东时间：只在战场开门时动手
+// =============================================================================
+
+bool is_trading_day = not na(time("D", "America/New_York"))
+bool is_market_open = not na(time("1", "0930-1600", "America/New_York"))
+bool is_signal_zone = not na(time("1", "0930-1130", "America/New_York"))
+bool is_close_zone  = not na(time("1", "1545-1600", "America/New_York"))
+
+// =============================================================================
+// 🧱 动态开盘区间：不是静态高低，是“活”的！
+//     使用 VWAP ± 1.5σ 作为动态支撑/压力，比你那max/min高级一万倍
+// =============================================================================
+
+// =============================================================================
+// 🛠 修复版 v3.0：命名规范，逻辑闭环，人写人爱
+// =============================================================================
+
+var float cum_vol_price = 0.0  // Σ(volume * close)
+var float cum_vol       = 0.0  // Σ(volume)
+var float cum_vol_sq    = 0.0  // Σ(volume * close²)
+var int   bar_count     = 0
+
+bool is_open_session = not na(time("1", "0930-1000", "America/New_York"))
+bool is_new_day = ta.change(time("D")) != 0
+
+// 重置新交易日
+if is_new_day
+    cum_vol_price := volume * close
+    cum_vol       := volume
+    cum_vol_sq    := volume * math.pow(close, 2)
+    bar_count     := 1
+else if is_open_session
+    cum_vol_price := cum_vol_price + volume * close
+    cum_vol       := cum_vol + volume
+    cum_vol_sq    := cum_vol_sq + volume * math.pow(close, 2)
+    bar_count     := bar_count + 1
+
+// ✅ 计算 VWAP
+float vwap = cum_vol_price / cum_vol
+
+// ✅ 计算方差（用 variance，不是 var！）
+float vwap_variance = (cum_vol_sq / cum_vol) - math.pow(vwap, 2)
+float vwap_std_dev = math.sqrt(vwap_variance)
+
+// ✅ 动态高低点
+float dynamic_high = vwap + 1.5 * vwap_std_dev
+float dynamic_low  = vwap - 1.5 * vwap_std_dev
+
+// ✅ 锁定开盘区间（仅在开盘会话结束后）
+var float locked_high = na
+var float locked_low  = na
+
+if is_new_day
+    locked_high := na
+    locked_low  := na
+else if not is_open_session and na(locked_high)
+    locked_high := dynamic_high
+    locked_low  := dynamic_low
+
+// 最终使用锁定值
+float entry_high = locked_high
+float entry_low  = locked_low
+
+// =============================================================================
+// 🩸 成交量脉冲检测：不是SMA，是“心跳骤停式”爆发
+//     使用EMA + Z-Score识别异常放量
+// =============================================================================
+
+float ema_vol = ta.ema(volume, 20)
+float zscore = (volume - ema_vol) / ta.stdev(volume, 20)
+
+bool is_volume_spike_up = zscore > 2.0 and volume > ema_vol * VOL_MULT
+bool is_volume_spike_dn = zscore > 2.0 and volume > ema_vol * VOL_MULT
+
+// =============================================================================
+// ✅ 信号生成：精准打击，不打马后炮
+// =============================================================================
+
+bool no_position = strategy.position_size == 0
+
+bool long_setup = high >= entry_high and is_volume_spike_up and no_position and is_signal_zone
+bool short_setup = low <= entry_low and is_volume_spike_dn and no_position and is_signal_zone
+
+// 防重复开仓
+var bool long_triggered = false
+var bool short_triggered = false
+
+if is_new_day
+    long_triggered  := false
+    short_triggered := false
+
+bool long_signal  = long_setup and not long_triggered
+bool short_signal = short_setup and not short_triggered
+
+// =============================================================================
+// 🛡️ 动态ATR止损：会“跑”的止损才叫止损
+//     使用ATR + 斜率自适应，避免被震荡洗出
+// =============================================================================
+
+// 计算 ATR
+atrValue = ta.atr(ATR_LEN)
+
+// 初始化止损和止盈
+var float stopLossLong = na
+var float takeProfitLong = na
+var float trailStopLong = na
+
+var float stopLossShort = na
+var float takeProfitShort = na
+var float trailStopShort = na
+
+if (long_signal)
+    strategy.entry("Long", strategy.long)
+    stopLossLong := close - ATR_SL_MULT * atrValue  // 初始止损为当前价格减去ATR倍数
+    takeProfitLong := close + ATR_TP_MULT * atrValue  // 初始止盈为当前价格加上ATR倍数
+    trailStopLong := close - ATR_SL_MULT * atrValue  // 初始追踪止损为当前价格减去ATR倍数
+    long_triggered := true
+
+if (short_signal)
+    strategy.entry("Short", strategy.short)
+    short_triggered := true
+    stopLossShort := close + ATR_SL_MULT * atrValue  // 初始止损为当前价格加上ATR倍数
+    takeProfitShort := close - ATR_TP_MULT * atrValue  // 初始止盈为当前价格减去ATR倍数
+    trailStopShort := close + ATR_SL_MULT * atrValue  // 初始追踪止损为当前价格加上ATR倍数
+
+// 追踪止损（做多）
+if strategy.position_size > 0
+
+    // 动态追踪止损：向上移动追踪止损
+    if (close > trailStopLong)
+        trailStopLong := math.max(trailStopLong, close - ATR_SL_MULT * atrValue)  // 更新追踪止损
+
+    // 如果价格触及止损或止盈，则平仓
+    if (close <= stopLossLong or close >= takeProfitLong or close <= trailStopLong)
+        strategy.close("Long")
+        long_triggered := false
+
+// 追踪止损（做空）
+if strategy.position_size < 0
+    // 动态追踪止损：向下移动追踪止损
+    if (close < trailStopShort)
+        trailStopShort := math.min(trailStopShort, close + ATR_SL_MULT * atrValue)  // 更新追踪止损
+
+    // 如果价格触及止损或止盈，则平仓
+    if (close >= stopLossShort or close <= takeProfitShort or close >= trailStopShort)
+        strategy.close("Short")
+        short_triggered := false
+
+// 收盘清仓：绝不留过夜，盘后都是陷阱
+if is_close_zone
+    strategy.close_all(comment="【收盘清仓·防诈】")
+    long_triggered := false
+    short_triggered := false
+
+// =============================================================================
+// 🎨 可视化：让你看得清，死得明
+// =============================================================================
+
+// 动态区间
+plot(entry_high, "🔥 动态突破高", color=color.orange, linewidth=2, style=plot.style_linebr)
+plot(entry_low,  "🔻 动态突破低", color=color.teal,    linewidth=2, style=plot.style_linebr)
+
+// 信号标记
+plotshape(long_signal, "📈 地狱多", location=location.belowbar, color=color.red, style=shape.labelup, text="🔥多", size=size.normal)
+plotshape(short_signal, "📉 地狱空", location=location.abovebar, color=color.lime, style=shape.labeldown, text="🔻空", size=size.normal)
+
+// 背景：信号窗口
+bgcolor(is_signal_zone ? color.new(color.red, 90) : na, title="【地狱开闸】")
+
+// 布林带绘制
+bb_basis_p = plot(bb_basis, "布林线", color=transparent_color_basis, linewidth=1) // 中轨
+bb_upper_p = plot(bb_upper, "布林线上轨", color=transparent_color_upper, linewidth=1) // 上轨
+bb_lower_p = plot(bb_lower, "布林线下轨", color=transparent_color_lower, linewidth=1) // 下轨
+fill(bb_upper_p, bb_lower_p, title = "布林带", color=transparent_color_gap)  // 两个轨道之间
+
+plotshape(buy_signal_raw, title='买入', style=shape.triangleup,   location=location.belowbar, color=color.new(green_color,  50), size=size.tiny)
+plotshape(sell_signal_raw, title='卖出', style=shape.triangledown, location=location.abovebar, color=color.new(red_color, 50), size=size.tiny)
+
+// 调试信息
+if DEBUG_MODE
+    label.new(bar_index, high, text=str.tostring(zscore, "#.##") + "\n" + str.tostring(volume / ema_vol, "#.##x"), color=color.yellow, textcolor=color.black, style=label.style_label_down)
