@@ -1,0 +1,265 @@
+
+// 策略核心理念:
+// “盘整”是能量积蓄，“突破”是释放，“放量”是确认
+// 市场从不缺机会，缺的是能在‘死寂中听见心跳’的耳朵
+
+//@version=6
+strategy(title = "BoilDetector",
+     shorttitle = "Boil",
+     overlay = true,
+     initial_capital = 10000,
+     max_bars_back = 5000,
+     commission_type = strategy.commission.percent, 
+     commission_value = 0.01,
+     calc_on_every_tick = false, 
+     process_orders_on_close = true,
+     pyramiding = 0, 
+     default_qty_type = strategy.percent_of_equity, 
+     default_qty_value = 80)
+
+// ================================
+// 参数区
+// ================================
+grpCore   = "核心逻辑"
+N         = input.int(12, "盘整检测窗口 N", minval = 5, group = grpCore, tooltip = "用于ATR、均量、实体均值等统计")
+rangeCapK = input.int(8, "窄区间连续K线阈值(行为周期)", minval = 3, group = grpCore, tooltip = "用于辅助识别连续窄波动横盘的最小K线数")
+lowVolPct = input.float(0.25, "低波动百分位近似(0~1)", minval = 0.05, maxval = 1.0, step=0.01, group = grpCore, tooltip = "以区间法近似“近期最低20%”")
+boxTightK = input.float(1.4, "箱体紧致度阈值(相对平均波幅)", minval = 0.1, step=0.1, maxval = 3, group = grpCore, tooltip = "箱体高度 < 平均真波幅*该系数 => 记作“窄”")
+volMeanLen= input.int(20, "均量周期", minval = 10, group = grpCore)
+volShrink = input.float(0.4, "缩量阈值(相对均量)", minval = 0.3, step=0.1, maxval = 10, group = grpCore)
+
+grpBreak  = "突破判定"
+brBufPct  = input.float(0.003, "突破缓冲(±%)", step = 0.001, minval = 0.0, group = grpBreak, tooltip = "如 0.003=0.3%")
+useBody   = input.bool(true, "需要大实体K线确认", group = grpBreak)
+bodyMult  = input.float(1.5, "大实体倍数(相对近N均实体)", minval = 1.0, step = 0.1, group = grpBreak)
+need2Bar  = input.bool(true, "需要连续两根同向确认", group = grpBreak)
+
+grpPulse  = "脉冲过滤"
+volMult   = input.float(2.0, "放量倍数(当前/均量)", minval = 1.0, step = 0.1, group = grpPulse)
+zLen      = input.int(20, "Z-Score长度", minval = 10, group = grpPulse)
+zThr      = input.float(2.0, "Z-Score阈值", minval = 1.0, step = 0.1, group = grpPulse)
+
+grpRisk   = "风控与出场"
+slMode    = input.string("BOX_OR_ATR", "初始止损模式", options = ["BOX_ONLY", "ATR_ONLY", "BOX_OR_ATR"], group = grpRisk)
+atrLen    = input.int(14, "ATR长度", minval = 5, group = grpRisk)
+atrMultSL = input.float(1.5, "ATR止损倍数", minval = 0.5, step = 0.1, group = grpRisk)
+useTSLL   = input.bool(true, "启用TSLL(ATR跟踪)", group = grpRisk, tooltip = "用ATR做动态跟踪止损")
+tsllMult  = input.float(5.6, "TSLL ATR 倍数", minval = 0.5, step = 0.1, group = grpRisk)
+useTP     = input.bool(true, "启用RR止盈", group = grpRisk)
+rr        = input.float(6, "RR 比例(止盈:止损)", minval = 1.0, step = 0.1, group = grpRisk)
+
+grpViz    = "可视化"
+showBox   = input.bool(true, "绘制盘整箱体", group = grpViz)
+showStop  = input.bool(true, "绘制止损/跟踪止损", group = grpViz)
+showLabels= input.bool(true, "信号打标", group = grpViz)
+
+// ================================
+// 基础量化
+// ================================
+atr = ta.atr(atrLen)
+tr  = ta.tr(true)
+avgTR = ta.sma(tr, N)
+
+// 近N实体均值
+body = math.abs(close - open)
+avgBody = ta.sma(body, N)
+
+// 成交量统计
+volEma = ta.ema(volume, volMeanLen)
+volSma = ta.sma(volume, volMeanLen)
+volBase = na(volEma) ? volSma : volEma
+volStdev = ta.stdev(volume, zLen)
+z = volStdev == 0.0 ? 0.0 : (volume - ta.ema(volume, zLen)) / volStdev
+
+// 盘整“三分制评分”
+// 1) 低波动：ATR 位于近N区间底部的 lowVolPct 近似
+atrMin = ta.lowest(atr, N)
+atrMax = ta.highest(atr, N)
+atrBand = atrMax - atrMin
+atrLowBand = atrMin + atrBand * lowVolPct
+isLowVol = atr <= atrLowBand
+
+// 2) 窄区间：最近 N 根的箱体高度相对平均真波幅足够小
+boxHighN = ta.highest(high, N)
+boxLowN  = ta.lowest(low, N)
+boxHeight= boxHighN - boxLowN
+isTight  = boxHeight <= avgTR * boxTightK
+
+// 3) 缩量：当前量 < 均量 * volShrink
+isShrink = volume <= volBase * volShrink
+
+score = (isLowVol ? 1 : 0) + (isTight ? 1 : 0) + (isShrink ? 1 : 0)
+isConsolidation = score >= 2
+
+// 行为周期辅助：连续 rangeCapK 根“低波动窄波动”
+narrowBar = tr <= avgTR * boxTightK
+narrowStreak = ta.barssince(not narrowBar)
+consAssist = narrowStreak >= rangeCapK - 1
+
+isDeadWater = isConsolidation or consAssist
+
+// 动态盘整区：当处于盘整时刷新，否则保持最近一次盘整区
+var float boxHigh = na
+var float boxLow  = na
+var int   boxSetBar = na
+
+if isDeadWater
+    boxHigh := boxHighN
+    boxLow  := boxLowN
+    boxSetBar := bar_index
+
+// ================================
+// 突破识别
+// ================================
+bufUp = not na(boxHigh) ? boxHigh * brBufPct : high * brBufPct
+bufDn = not na(boxLow)  ? boxLow  * brBufPct : low  * brBufPct
+
+breakUp = not na(boxHigh) and close > boxHigh + bufUp
+breakDn = not na(boxLow)  and close < boxLow  - bufDn
+
+// 大实体确认（可选）
+bigBody = body > avgBody * bodyMult
+okBodyUp = not useBody or (bigBody and close > open)
+okBodyDn = not useBody or (bigBody and close < open)
+
+// 两根同向确认（可选）
+dirUp2 = breakUp and (not need2Bar or (close > close[1] and high > high[1]))
+dirDn2 = breakDn and (not need2Bar or (close < close[1] and low  < low[1]))
+
+// ================================
+// 脉冲确认（放量 + Z-Score）
+// ================================
+pulse = (volume >= volBase * volMult) and (z >= zThr)
+
+// 终极触发：突破 + 脉冲 + 实体/两根过滤
+longSignal  = dirUp2 and okBodyUp and pulse
+shortSignal = dirDn2 and okBodyDn and pulse
+
+// ================================
+// 风控：初始止损与TSLL
+// ================================
+calcBoxSL_long  = not na(boxLow)  ? boxLow  : na
+calcBoxSL_short = not na(boxHigh) ? boxHigh : na
+
+calcAtrSL_long  = close - atrMultSL * atr
+calcAtrSL_short = close + atrMultSL * atr
+
+getInitSL_long() =>
+    switch slMode
+        "BOX_ONLY"     => calcBoxSL_long
+        "ATR_ONLY"     => calcAtrSL_long
+        => math.max(calcBoxSL_long, calcAtrSL_long)  // 取更保守的一侧（离价格更远）
+
+getInitSL_short() =>
+    switch slMode
+        "BOX_ONLY"     => calcBoxSL_short
+        "ATR_ONLY"     => calcAtrSL_short
+        => math.min(calcBoxSL_short, calcAtrSL_short)
+
+// 进场与记录风险距离
+var float longEntrySL = na
+var float shortEntrySL = na
+
+// 清理：若无持仓，清空历史SL（防脏值干扰）
+if strategy.position_size == 0
+    longEntrySL  := na
+    shortEntrySL := na
+
+// 进场
+if (strategy.position_size == 0) and longSignal
+    longEntrySL := getInitSL_long()
+    if not na(longEntrySL) and longEntrySL < close
+        strategy.entry("LONG", strategy.long)
+if (strategy.position_size == 0) and shortSignal
+    shortEntrySL := getInitSL_short()
+    if not na(shortEntrySL) and shortEntrySL > close
+        strategy.entry("SHORT", strategy.short)
+
+// 计算 TSLL 轨迹（手动），便于可视化与条件出场
+var float tsllLong = na
+var float tsllShort = na
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+avgPx   = strategy.position_avg_price
+
+barsSinceEntry = ta.barssince(strategy.position_size == 0)
+lenLookback = na(barsSinceEntry) ? atrLen : barsSinceEntry + 1
+
+if inLong
+    hh = ta.highest(high, lenLookback)
+    tsllLong := hh - tsllMult * atr
+if inShort
+    ll = ta.lowest(low, lenLookback)
+    tsllShort := ll + tsllMult * atr
+if strategy.position_size == 0
+    tsllLong := na
+    tsllShort := na
+
+// 计算止盈价格（基于RR）
+longRisk  = inLong  ? (avgPx - (na(longEntrySL) ? avgPx - atrMultSL * atr : longEntrySL))  : na
+shortRisk = inShort ? ((na(shortEntrySL) ? avgPx + atrMultSL * atr : shortEntrySL) - avgPx) : na
+tpLong  = useTP and inLong  and not na(longRisk)  ? avgPx + rr * longRisk  : na
+tpShort = useTP and inShort and not na(shortRisk) ? avgPx - rr * shortRisk : na
+
+crossunder_tsllLong = ta.crossunder(close, tsllLong)
+crossunder_tsllShort = ta.crossover(close, tsllShort)
+
+// 出场逻辑：优先 TSLL，其次初始SL，另外考虑RR止盈
+exitLong_TSLL = useTSLL and inLong  and not na(tsllLong)  and crossunder_tsllLong
+exitShort_TSLL= useTSLL and inShort and not na(tsllShort) and crossunder_tsllShort
+
+exitLong_BoxSL_longEntrySL = ta.crossunder(close, longEntrySL)
+exitShort_BoxSL_shortEntrySL = ta.crossover(close, shortEntrySL)
+
+exitLong_BoxSL = inLong  and not na(longEntrySL)  and exitLong_BoxSL_longEntrySL
+exitShort_BoxSL= inShort and not na(shortEntrySL) and exitShort_BoxSL_shortEntrySL
+
+exitLong_TP_tpLong = ta.crossover(close, tpLong)
+exitShort_TP_tpShort = ta.crossunder(close, tpShort)
+
+exitLong_TP  = useTP and inLong  and not na(tpLong)  and exitLong_TP_tpLong
+exitShort_TP = useTP and inShort and not na(tpShort) and exitShort_TP_tpShort
+
+// 执行出场（用市价模拟，优先满足最先触发的条件）
+if exitLong_TSLL or exitLong_BoxSL or exitLong_TP
+    strategy.close("LONG", comment = exitLong_TSLL ? "TSLL" : exitLong_BoxSL ? "BOX/ATR SL" : "TP")
+if exitShort_TSLL or exitShort_BoxSL or exitShort_TP
+    strategy.close("SHORT", comment = exitShort_TSLL ? "TSLL" : exitShort_BoxSL ? "BOX/ATR SL" : "TP")
+
+// 事件驱动：若产生突破信号（无论是否进场成功），重置“旧盘整”，等待下一个死水
+if longSignal or shortSignal
+    // 重置的策略：让新一轮盘整需重新积累分数
+    boxHigh := na
+    boxLow  := na
+    boxSetBar := na
+
+// ================================
+// 可视化 & 诊断
+// ================================
+plot(showBox and not na(boxHigh) ? boxHigh : na, "Consolidation High", style=plot.style_linebr, linewidth=2)
+plot(showBox and not na(boxLow)  ? boxLow  : na, "Consolidation Low",  style=plot.style_linebr, linewidth=2)
+
+plot(showStop and inLong  and not na(longEntrySL) ? longEntrySL : na, "Init SL (Long)", color=color.new(color.red, 0))
+plot(showStop and inShort and not na(shortEntrySL)? shortEntrySL: na, "Init SL (Short)", color=color.new(color.red, 0))
+plot(showStop and inLong  and not na(tsllLong)    ? tsllLong    : na, "TSLL (Long)", color=color.new(color.orange, 0))
+plot(showStop and inShort and not na(tsllShort)   ? tsllShort   : na, "TSLL (Short)", color=color.new(color.orange, 0))
+plot(useTP and inLong  and not na(tpLong)  ? tpLong  : na, "TP (Long)", color=color.new(color.green, 0))
+plot(useTP and inShort and not na(tpShort) ? tpShort : na, "TP (Short)", color=color.new(color.green, 0))
+
+bgcolor(isDeadWater ? color.new(color.blue, 92) : na)
+
+if showLabels and longSignal
+    label.new(bar_index, high, "上破+放量", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 0))
+if showLabels and shortSignal
+    label.new(bar_index, low, "下破+放量", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0))
+
+// 诊断面板
+var tbl = table.new(position.top_right, 1, 6, border_width=1)
+if barstate.islast
+    table.cell(tbl, 0, 0, "Score: " + str.tostring(score) + "  (低波动:"+str.tostring(isLowVol)+", 窄:"+str.tostring(isTight)+", 缩量:"+str.tostring(isShrink)+")")
+    table.cell(tbl, 0, 1, "Pulse: " + str.tostring(pulse) + "  vol/avg=" + str.tostring(volume/(volBase+1e-9), format.mintick))
+    table.cell(tbl, 0, 2, "Z="+str.tostring(z, format.mintick)+" ≥ "+str.tostring(zThr))
+    table.cell(tbl, 0, 3, "Box High/Low: " + (na(boxHigh)?"NA":str.tostring(boxHigh, format.price)) + " / " + (na(boxLow)?"NA":str.tostring(boxLow, format.price)))
+    table.cell(tbl, 0, 4, "TSLL on? " + str.tostring(useTSLL) + "  RR on? " + str.tostring(useTP) + "("+str.tostring(rr)+")")
+    table.cell(tbl, 0, 5, "InPos: " + str.tostring(strategy.position_size))
