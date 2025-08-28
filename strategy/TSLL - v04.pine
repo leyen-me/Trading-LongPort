@@ -4,7 +4,6 @@ strategy(title = "【破晓者 Pro·地狱制裁版】⚡TSLL ONLY", overlay = t
          commission_type = strategy.commission.percent, commission_value = 0.01,
          calc_on_every_tick = false, process_orders_on_close = true, pyramiding = 1)
 
-// 它最喜欢“死水突然沸腾”的那一刻。 盘整末期 + 突破放量
 // TSLL 365天 盈利90.61% 最大回撤7.35% 夏普率 0.697
 
 // =============================================================================
@@ -20,6 +19,8 @@ float   ATR_TP_MULT      = input.float(6.8, "🎯 止盈倍数", minval=0.5, ste
 bool    USE_VOL_SPIKE    = input.bool(true, "⚡ 启用成交量脉冲过滤")
 bool    DEBUG_MODE       = input.bool(false, "🐞 调试模式（显示内部变量）")
 
+float   BAR_RET_LIMIT    = input.float(0.016, "🚫 单根K线涨跌幅阈值", minval=0.005, step=0.001)  // 默认 1.6%
+
 // =============================================================================
 // 🌆 美东时间：只在战场开门时动手
 // =============================================================================
@@ -32,10 +33,6 @@ bool is_close_zone  = not na(time("1", "1545-1600", "America/New_York"))
 // =============================================================================
 // 🧱 动态开盘区间：不是静态高低，是“活”的！
 //     使用 VWAP ± 1.5σ 作为动态支撑/压力，比你那max/min高级一万倍
-// =============================================================================
-
-// =============================================================================
-// 🛠 修复版 v3.0：命名规范，逻辑闭环，人写人爱
 // =============================================================================
 
 var float cum_vol_price = 0.0  // Σ(volume * close)
@@ -96,13 +93,23 @@ bool is_volume_spike_up = USE_VOL_SPIKE ? zscore > 2.0 and volume > ema_vol * VO
 bool is_volume_spike_dn = USE_VOL_SPIKE ? zscore > 2.0 and volume > ema_vol * VOL_MULT : true
 
 // =============================================================================
+// 🚫 单根K线涨跌幅过滤器
+// =============================================================================
+
+// 单根K线涨跌幅 = 当前收盘 / 上一收盘 - 1
+float bar_return = close[1] == 0 ? 0 : (close - close[1]) / close[1]
+
+// 是否超出阈值
+bool is_bar_extreme = math.abs(bar_return) > BAR_RET_LIMIT
+
+// =============================================================================
 // ✅ 信号生成：精准打击，不打马后炮
 // =============================================================================
 
 bool no_position = strategy.position_size == 0
 
-bool long_setup = high >= entry_high and is_volume_spike_up and no_position and is_signal_zone
-bool short_setup = low <= entry_low and is_volume_spike_dn and no_position and is_signal_zone
+bool long_setup = high >= entry_high and is_volume_spike_up and no_position and is_signal_zone and not is_bar_extreme
+bool short_setup = low <= entry_low and is_volume_spike_dn and no_position and is_signal_zone and not is_bar_extreme
 
 // 防重复开仓
 var bool long_triggered = false
