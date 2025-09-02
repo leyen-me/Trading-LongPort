@@ -1,14 +1,15 @@
-# ======== 最小运行镜像 ========
-FROM debian:bookworm-slim
+FROM rust:1.78.0 AS builder
 
-# 设置工作目录
 WORKDIR /app
 
-# 复制本地编译好的二进制文件
+COPY Cargo.toml Cargo.lock ./
+
+COPY ./src ./src
+
+RUN cargo build --release
+
 COPY release/vwap ./vwap
 
-# 暴露端口
 EXPOSE 8080
 
-# 启动命令
 CMD ["./vwap"]

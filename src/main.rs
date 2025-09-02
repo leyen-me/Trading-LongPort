@@ -305,7 +305,7 @@ async fn buy(
         .await
         .map_err(|e| TradingError::SDKError(e.to_string()))?;
 
-    let quantity = (max_buy_resp.margin_max_qty * purchase_ratio).trunc();
+    let quantity = (max_buy_resp.cash_max_qty * purchase_ratio).trunc();
 
     if quantity < decimal!(1) {
         warn!(symbol, "可买数量不足（{}），取消买入", quantity);
