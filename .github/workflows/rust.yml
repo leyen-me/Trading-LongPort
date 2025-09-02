@@ -15,5 +15,12 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
+
     - name: Build
       run: cargo build --release
+    
+    - name: Upload binary
+      uses: actions/upload-artifact@v4
+      with:
+        path: ./target/release/vwap
+        name: vwap
