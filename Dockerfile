@@ -4,7 +4,7 @@ FROM debian:bookworm-slim
 WORKDIR /app
 
 # 复制本地编译好的二进制文件
-COPY release/vwap ./vwap
+COPY /target/release/vwap ./vwap
 
 # 暴露端口
 EXPOSE 8080

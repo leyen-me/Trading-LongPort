@@ -4,10 +4,7 @@ use longport::Decimal;
 use longport::{
     Config, decimal,
     quote::QuoteContext,
-    trade::{
-        EstimateMaxPurchaseQuantityOptions, OrderSide, OrderStatus, OrderType, OutsideRTH,
-        StockPosition, SubmitOrderOptions, TimeInForceType, TradeContext,
-    },
+    trade::{ EstimateMaxPurchaseQuantityOptions, OrderSide, OrderStatus, OrderType, OutsideRTH, SubmitOrderOptions, TimeInForceType, TradeContext },
 };
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -20,54 +17,59 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
-/// ==================== 配置常量 ====================
-const DO_LONG_SYMBOL: &str = "TSLL.US";
-const DO_SHORT_SYMBOL: &str = "TSDD.US";
+/// ==================== Constants ====================
+const SYMBOL_LONG: &str = "TSLL.US";
+const SYMBOL_SHORT: &str = "TSLQ.US";
+const DEFAULT_PURCHASE_RATIO: f64 = 0.5;
+const DEFAULT_SELL_RATIO: f64 = 0.5;
+const RETRY_COUNT: usize = 5;
+const RETRY_DELAY_SECS: u64 = 10;
+const ORDER_WAIT_SECS: u64 = 30;
 
-/// ==================== 枚举定义 ====================
+/// ==================== Enums ====================
 #[derive(Debug, Clone, PartialEq)]
-enum Action {
+enum TradeAction {
     Buy,
     Sell,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Sentiment {
+enum MarketSentiment {
     Long,
     Short,
     Flat,
 }
 
-/// ==================== Webhook 请求结构 ====================
+/// ==================== Webhook Payload ====================
 #[derive(Deserialize, Debug)]
-struct WebhookPayload {
+struct WebhookRequest {
     action: String,
     sentiment: String,
 }
 
 #[derive(Serialize, Debug)]
-struct ApiResponse {
+struct WebApiResponse {
     status: &'static str,
     message: Option<String>,
 }
 
-/// ==================== 共享状态（交易上下文）====================
+/// ==================== Shared State ====================
 struct AppState {
     quote_ctx: Arc<QuoteContext>,
     trade_ctx: Arc<TradeContext>,
 }
 
-/// ==================== 错误类型 ====================
+/// ==================== Error Handling ====================
 #[derive(thiserror::Error, Debug)]
 enum TradingError {
-    #[error("解析信号失败: {0}")]
+    #[error("Signal parsing error: {0}")]
     ParseError(String),
-    #[error("获取盘口失败: {0}")]
+    #[error("Quote retrieval error: {0}")]
     QuoteError(String),
-    #[error("交易执行失败: {0}")]
+    #[error("Trade execution error: {0}")]
     TradeError(String),
-    #[error("网络或SDK错误: {0}")]
-    SDKError(String),
+    #[error("SDK or network error: {0}")]
+    SdkError(String),
 }
 
 impl IntoResponse for TradingError {
@@ -79,7 +81,7 @@ impl IntoResponse for TradingError {
         };
         (
             status,
-            Json(ApiResponse {
+            Json(WebApiResponse {
                 status: "error",
                 message: Some(message.to_string()),
             }),
@@ -88,63 +90,64 @@ impl IntoResponse for TradingError {
     }
 }
 
-/// 判断订单是否仍有效且可撤单
+/// ==================== Order Status Utilities ====================
 fn is_order_active_and_cancellable(status: &OrderStatus) -> bool {
     matches!(
         status,
-        OrderStatus::WaitToNew // 等待报单
-            | OrderStatus::New // 已报单未成交
-            | OrderStatus::WaitToReplace // 等待改单
-            | OrderStatus::PendingReplace // 改单中
-            | OrderStatus::PartialFilled // 部分成交
+        OrderStatus::WaitToNew
+            | OrderStatus::New
+            | OrderStatus::WaitToReplace
+            | OrderStatus::PendingReplace
+            | OrderStatus::PartialFilled
     )
 }
 
-/// 判断订单是否已进入终态（无需处理）
 fn is_order_terminal(status: &OrderStatus) -> bool {
     matches!(
         status,
-        OrderStatus::Filled // 完全成交
-            | OrderStatus::Rejected // 被拒
-            | OrderStatus::Canceled // 已取消
-            | OrderStatus::Expired // 已过期
-            | OrderStatus::Replaced // 已改单
-            | OrderStatus::PartialWithdrawal // 部分撤回
-            | OrderStatus::WaitToCancel // 撤销上报中
-            | OrderStatus::PendingCancel // 撤销中
+        OrderStatus::Filled
+            | OrderStatus::Rejected
+            | OrderStatus::Canceled
+            | OrderStatus::Expired
+            | OrderStatus::Replaced
+            | OrderStatus::PartialWithdrawal
+            | OrderStatus::WaitToCancel
+            | OrderStatus::PendingCancel
     )
 }
 
-/// ==================== 工具函数 ====================
-
-async fn get_ask_price(quote_ctx: &QuoteContext, symbol: &str) -> Option<Decimal> {
-    quote_ctx
-        .depth(symbol)
+/// ==================== Quote Utilities ====================
+async fn get_ask_price(ctx: &QuoteContext, symbol: &str) -> Option<Decimal> {
+    ctx.depth(symbol)
         .await
         .ok()
         .and_then(|depth| depth.asks.first()?.price)
 }
 
-async fn get_bid_price(quote_ctx: &QuoteContext, symbol: &str) -> Option<Decimal> {
-    quote_ctx
-        .depth(symbol)
+async fn get_bid_price(ctx: &QuoteContext, symbol: &str) -> Option<Decimal> {
+    ctx.depth(symbol)
         .await
         .ok()
         .and_then(|depth| depth.bids.first()?.price)
 }
 
-/// 构建标准化的限价单
-fn build_order(
+/// ==================== Order Builders ====================
+fn build_limit_order(
     symbol: &str,
     side: OrderSide,
     quantity: Decimal,
     price: Decimal,
-    time_in_force: TimeInForceType,
     remark: Option<&str>,
 ) -> SubmitOrderOptions {
-    let mut order = SubmitOrderOptions::new(symbol, OrderType::LO, side, quantity, time_in_force)
-        .submitted_price(price)
-        .outside_rth(OutsideRTH::AnyTime);
+    let mut order = SubmitOrderOptions::new(
+        symbol,
+        OrderType::LO,
+        side,
+        quantity,
+        TimeInForceType::Day,
+    )
+    .submitted_price(price)
+    .outside_rth(OutsideRTH::AnyTime);
 
     if let Some(remark) = remark {
         order = order.remark(remark);
@@ -153,421 +156,304 @@ fn build_order(
     order
 }
 
-/// 带重试机制的安全卖出（主交易接口）
-async fn sell_with_retry(
-    trade_ctx: &TradeContext,
-    quote_ctx: &QuoteContext,
-    symbol: &str,
+/// ==================== Sell Task (Background) ====================
+async fn sell_background_task(
+    trade_ctx: Arc<TradeContext>,
+    quote_ctx: Arc<QuoteContext>,
+    symbol: String,
     target_quantity: Decimal,
     max_retries: usize,
     retry_delay: Duration,
-) -> Result<(), TradingError> {
+) {
     let mut remaining = target_quantity;
     let mut attempt = 0;
 
     info!(
         symbol,
-        quantity = %target_quantity.to_string(),
-        "开始重试卖出流程，最多 {} 次",
+        quantity = %target_quantity,
+        "Starting sell background task with max retries: {}",
         max_retries
     );
 
     while remaining >= decimal!(1) && attempt < max_retries {
         attempt += 1;
+        info!(symbol, attempt, remaining = %remaining, "Attempt {} to sell", attempt);
 
-        info!(
-            symbol,
-            attempt,
-            remaining = %remaining.to_string(),
-            "第 {} 次尝试卖出",
-            attempt
-        );
-
-        // Step 1: 获取最新买一价
-        let current_price = get_bid_price(quote_ctx, symbol)
-            .await
-            .ok_or(TradingError::QuoteError("无法获取买一价".to_string()))?;
-
-        // Step 2: 构建订单
-        let order_opts = build_order(
-            symbol,
-            OrderSide::Sell,
-            remaining,
-            current_price,
-            TimeInForceType::Day,
-            Some(if symbol == DO_LONG_SYMBOL {
-                "多头平仓"
-            } else {
-                "空头平仓"
-            }),
-        );
-
-        // Step 3: 提交订单
-        let resp = match trade_ctx.submit_order(order_opts).await {
-            Ok(resp) => {
-                info!(order_id = %resp.order_id, "卖出订单已提交");
-                resp
-            }
-            Err(e) => {
-                warn!(symbol, error = %e, "提交订单失败，等待重试");
+        let price = match get_bid_price(&quote_ctx, &symbol).await {
+            Some(p) => p,
+            None => {
+                warn!(symbol, "Failed to get bid price, retrying...");
                 sleep(retry_delay).await;
                 continue;
             }
         };
 
-        let order_id = resp.order_id;
+        let remark = if symbol == SYMBOL_LONG { "Close Long" } else { "Close Short" };
+        let order = build_limit_order(&symbol, OrderSide::Sell, remaining, price, Some(remark));
 
-        // Step 4: 等待 30 秒观察成交情况
-        sleep(Duration::from_secs(30)).await;
-
-        // Step 5: 查询订单状态
-        let order = match trade_ctx.order_detail(&order_id).await {
-            Ok(o) => o,
+        let order_id = match trade_ctx.submit_order(order).await {
+            Ok(resp) => resp.order_id,
             Err(e) => {
-                warn!(order_id = %order_id, error = %e, "查询订单状态失败");
+                warn!(symbol, error = %e, "Submit sell order failed");
                 sleep(retry_delay).await;
                 continue;
             }
         };
 
-        let filled = order.executed_quantity;
+        info!(order_id = %order_id, "Sell order submitted");
+
+        sleep(Duration::from_secs(ORDER_WAIT_SECS)).await;
+
+        let order_detail = match trade_ctx.order_detail(&order_id).await {
+            Ok(detail) => detail,
+            Err(e) => {
+                warn!(order_id = %order_id, error = %e, "Failed to fetch order detail");
+                sleep(retry_delay).await;
+                continue;
+            }
+        };
+
+        let filled = order_detail.executed_quantity;
         remaining = (remaining - filled).max(decimal!(0));
 
-        match order.status {
-            OrderStatus::Filled => {
-                info!(order_id = %order_id, "订单完全成交");
-            }
+        match order_detail.status {
+            OrderStatus::Filled => info!(order_id = %order_id, "Order fully filled"),
             OrderStatus::PartialFilled if remaining < decimal!(1) => {
-                info!(order_id = %order_id, filled = %filled.to_string(), "部分成交，剩余不足1股，放弃");
+                info!(order_id = %order_id, filled = %filled, "Partially filled, less than 1 unit, stop");
             }
             OrderStatus::PartialFilled => {
-                info!(
-                    order_id = %order_id,
-                    filled = %filled.to_string(),
-                    remaining = %remaining.to_string(),
-                    "部分成交，继续重试剩余数量"
-                );
+                info!(order_id = %order_id, filled = %filled, remaining = %remaining, "Partially filled, continue");
             }
             status if is_order_terminal(&status) => {
-                warn!(order_id = %order_id, ?status, "订单终态但未完全成交");
+                warn!(order_id = %order_id, ?status, "Order in terminal state");
             }
             _ => {
-                // 未成交，尝试撤单
-                if is_order_active_and_cancellable(&order.status) {
-                    info!(order_id = %order_id, "撤单未成交订单");
+                if is_order_active_and_cancellable(&order_detail.status) {
+                    info!(order_id = %order_id, "Cancelling unfilled order");
                     let _ = trade_ctx.cancel_order(&order_id).await;
                 }
             }
         }
 
-        // 重试间隔
         sleep(retry_delay).await;
     }
 
-    // 最终检查
     if remaining >= decimal!(1) {
-        return Err(TradingError::TradeError(format!(
-            "卖出失败：{} 次重试后仍剩余 {} 股未卖出",
-            max_retries, remaining
-        )));
+        error!(symbol, remaining = %remaining, "Sell task failed after retries");
+    } else {
+        info!(symbol, "Sell task completed successfully");
     }
-
-    info!(symbol, "卖出完成");
-    Ok(())
 }
 
-/// 执行买入
-async fn buy(
+/// ==================== Buy Logic ====================
+async fn buy_position(
     trade_ctx: &TradeContext,
     quote_ctx: &QuoteContext,
     symbol: &str,
 ) -> Result<(), TradingError> {
-    let max_purchase_ratio: f64 = env::var("MAX_PURCHASE_RATIO")
-        .unwrap_or_else(|_| "0.5".to_string()) // 如果没有设置环境变量，默认是 0.5
+    let ratio: f64 = env::var("MAX_PURCHASE_RATIO")
+        .unwrap_or_else(|_| DEFAULT_PURCHASE_RATIO.to_string())
         .parse()
-        .unwrap_or(0.5);
-    let purchase_ratio = decimal!(max_purchase_ratio);
+        .unwrap_or(DEFAULT_PURCHASE_RATIO);
 
-    info!(max_purchase_ratio);
-
-    let current_price = get_ask_price(quote_ctx, symbol)
+    let price = get_ask_price(quote_ctx, symbol)
         .await
-        .ok_or(TradingError::QuoteError("无法获取卖一价".to_string()))?;
+        .ok_or_else(|| TradingError::QuoteError("Failed to get ask price".to_string()))?;
 
-    let price_decimal = current_price;
+    let opts = EstimateMaxPurchaseQuantityOptions::new(symbol, OrderType::LO, OrderSide::Buy)
+        .price(price);
 
-    let estimate_opts =
-        EstimateMaxPurchaseQuantityOptions::new(symbol, OrderType::LO, OrderSide::Buy)
-            .price(price_decimal);
-
-    let max_buy_resp = trade_ctx
-        .estimate_max_purchase_quantity(estimate_opts)
+    let estimate = trade_ctx
+        .estimate_max_purchase_quantity(opts)
         .await
-        .map_err(|e| TradingError::SDKError(e.to_string()))?;
+        .map_err(|e| TradingError::SdkError(e.to_string()))?;
 
-    let quantity = (max_buy_resp.cash_max_qty * purchase_ratio).trunc();
+    let quantity = (estimate.cash_max_qty * decimal!(ratio)).trunc();
 
     if quantity < decimal!(1) {
-        warn!(symbol, "可买数量不足（{}），取消买入", quantity);
+        warn!(symbol, "Insufficient quantity to buy");
         return Ok(());
     }
 
-    info!(
-        symbol,
-        price = %current_price.to_string(),
-        quantity = %quantity.to_string(),
-        "估算最大买入量，准备下单"
-    );
+    info!(symbol, price = %price, quantity = %quantity, "Submitting buy order");
 
-    let order_opts = build_order(
-        symbol,
-        OrderSide::Buy,
-        quantity,
-        current_price,
-        TimeInForceType::Day,
-        Some(if symbol == DO_LONG_SYMBOL {
-            "多头买入"
-        } else {
-            "空头买入"
-        }),
-    );
+    let remark = if symbol == SYMBOL_LONG { "Open Long" } else { "Open Short" };
+    let order = build_limit_order(symbol, OrderSide::Buy, quantity, price, Some(remark));
 
     let resp = trade_ctx
-        .submit_order(order_opts)
+        .submit_order(order)
         .await
-        .map_err(|e| TradingError::TradeError(format!("买入失败: {}", e)))?;
+        .map_err(|e| TradingError::TradeError(format!("Buy order failed: {}", e)))?;
 
     let order_id = resp.order_id.clone();
-    info!(order_id = %order_id, "买入订单已提交");
+    info!(order_id = %order_id, "Buy order submitted");
 
-    // 🔥 启动后台任务：30 秒后检查是否成交，未成交则撤单
-    let trade_ctx_for_task: TradeContext = trade_ctx.clone();
+    let trade_ctx_clone = trade_ctx.clone();
     tokio::spawn(async move {
-        // 等待 30 秒
-        sleep(Duration::from_secs(30)).await;
-        // 查询订单最新状态
-        match trade_ctx_for_task.order_detail(&order_id).await {
+        sleep(Duration::from_secs(ORDER_WAIT_SECS)).await;
+        match trade_ctx_clone.order_detail(&order_id).await {
             Ok(order) => {
                 if is_order_terminal(&order.status) {
-                    debug!(order_id = %order_id, status = ?order.status, "订单已是终态，跳过撤单");
-                    return;
-                }
-                if is_order_active_and_cancellable(&order.status) {
-                    info!(order_id = %order_id, status = ?order.status, "订单未完成，正在撤单");
-                    if let Err(e) = trade_ctx_for_task.cancel_order(&order_id).await {
-                        error!(order_id = %order_id, "撤单失败: {}", e);
-                    } else {
-                        info!(order_id = %order_id, "撤单成功");
+                    debug!(order_id = %order_id, "Order already terminal");
+                } else if is_order_active_and_cancellable(&order.status) {
+                    info!(order_id = %order_id, "Cancelling unfilled order");
+                    if let Err(e) = trade_ctx_clone.cancel_order(&order_id).await {
+                        error!(order_id = %order_id, error = %e, "Cancel order failed");
                     }
-                } else {
-                    warn!(order_id = %order_id, status = ?order.status, "订单状态异常，无法处理");
                 }
             }
-            Err(e) => {
-                error!(order_id = %order_id, "查询订单状态失败: {}", e);
-            }
+            Err(e) => error!(order_id = %order_id, error = %e, "Failed to fetch order"),
         }
     });
 
     Ok(())
 }
 
-/// 执行卖出
-async fn sell(
-    trade_ctx: &TradeContext,
-    quote_ctx: &QuoteContext,
+/// ==================== Sell Logic ====================
+async fn sell_position(
+    trade_ctx: Arc<TradeContext>,
+    quote_ctx: Arc<QuoteContext>,
     symbol: &str,
     quantity: Decimal,
 ) -> Result<(), TradingError> {
-
-    let max_sell_ratio: f64 = env::var("MAX_SELL_RATIO")
-        .unwrap_or_else(|_| "0.5".to_string()) // 如果没有设置环境变量，默认是 0.5
+    let ratio: f64 = env::var("MAX_SELL_RATIO")
+        .unwrap_or_else(|_| DEFAULT_SELL_RATIO.to_string())
         .parse()
-        .unwrap_or(0.5);
-    let sell_ratio = decimal!(max_sell_ratio);
-    let target_quantity = (quantity * sell_ratio).trunc();
+        .unwrap_or(DEFAULT_SELL_RATIO);
 
-    sell_with_retry(
+    let target = (quantity * decimal!(ratio)).trunc();
+
+    tokio::spawn(sell_background_task(
         trade_ctx,
         quote_ctx,
-        symbol,
-        target_quantity,
-        5, // 最多重试 5 次
-        Duration::from_secs(10),
-    )
-    .await
+        symbol.to_string(),
+        target,
+        RETRY_COUNT,
+        Duration::from_secs(RETRY_DELAY_SECS),
+    ));
+
+    info!(symbol, quantity = %target, "Sell task started in background");
+    Ok(())
 }
 
-/// 执行做多
+/// ==================== Trade Actions ====================
 async fn do_long(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
     let state = state.lock().await;
-    info!("执行做多操作");
-    buy(&state.trade_ctx, &state.quote_ctx, DO_LONG_SYMBOL).await
+    buy_position(&state.trade_ctx, &state.quote_ctx, SYMBOL_LONG).await
 }
 
-/// 执行做空
 async fn do_short(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
     let state = state.lock().await;
-    info!("执行做空操作");
-    buy(&state.trade_ctx, &state.quote_ctx, DO_SHORT_SYMBOL).await
+    buy_position(&state.trade_ctx, &state.quote_ctx, SYMBOL_SHORT).await
 }
 
-/// 执行平仓
-async fn do_close_position(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
+async fn do_close(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
     let state = state.lock().await;
-    info!("开始执行平仓流程");
-
-    let positions_resp = state
+    let resp = state
         .trade_ctx
         .stock_positions(None)
         .await
-        .map_err(|e| TradingError::SDKError(e.to_string()))?;
+        .map_err(|e| TradingError::SdkError(e.to_string()))?;
 
-    for channel in positions_resp.channels {
-        for position in channel.positions {
-            if ![DO_LONG_SYMBOL, DO_SHORT_SYMBOL].contains(&position.symbol.as_str()) {
-                debug!(symbol = %position.symbol, "非目标标的，忽略");
+    for channel in resp.channels {
+        for pos in channel.positions {
+            if ![SYMBOL_LONG, SYMBOL_SHORT].contains(&pos.symbol.as_str()) {
+                debug!(symbol = %pos.symbol, "Ignored non-target symbol");
                 continue;
             }
 
-            match handle_position(&state.trade_ctx, &state.quote_ctx, position).await {
-                Ok(_) => {}
-                Err(e) => error!(error = %e, "平仓单执行失败"),
-            }
+            let trade_ctx = Arc::clone(&state.trade_ctx);
+            let quote_ctx = Arc::clone(&state.quote_ctx);
+
+            tokio::spawn(async move {
+                if let Err(e) = sell_position(trade_ctx, quote_ctx, &pos.symbol, pos.quantity).await {
+                    error!(error = %e, "Close position task failed");
+                }
+            });
         }
     }
 
     Ok(())
 }
 
-/// 处理单个持仓
-async fn handle_position(
-    trade_ctx: &TradeContext,
-    quote_ctx: &QuoteContext,
-    position: StockPosition,
-) -> Result<(), TradingError> {
-    let symbol = &position.symbol;
-    let qty = position.quantity;
-
-    if qty < decimal!(1) {
-        warn!(%symbol, quantity = %qty.to_string(), "剩余碎股，不平仓");
-        return Ok(());
-    }
-
-    if qty <= decimal!(0) {
-        info!(%symbol, "无持仓");
-        return Ok(());
-    }
-
-    info!(%symbol, quantity = %qty.to_string(), "持仓数量 > 0，准备卖出");
-    sell(trade_ctx, quote_ctx, symbol, qty).await
-}
-
-/// ==================== Webhook 路由 ====================
-
-/// 主要 Webhook 处理器
+/// ==================== Webhook Handlers ====================
 async fn webhook_handler(
     state: axum::extract::State<Arc<Mutex<AppState>>>,
-    Json(payload): Json<WebhookPayload>,
-) -> Result<Json<ApiResponse>, TradingError> {
-    info!("收到 TradingView 信号: {:?}", payload);
+    Json(payload): Json<WebhookRequest>,
+) -> Result<Json<WebApiResponse>, TradingError> {
+    info!("Received webhook: {:?}", payload);
 
-    let action = parse_action(&payload.action)?;
-    let sentiment = parse_sentiment(&payload.sentiment)?;
+    let action = match payload.action.to_lowercase().as_str() {
+        "buy" => TradeAction::Buy,
+        "sell" => TradeAction::Sell,
+        _ => return Err(TradingError::ParseError("Invalid action".to_string())),
+    };
 
-    info!(?action, ?sentiment, "交易信号解析完成");
+    let sentiment = match payload.sentiment.to_lowercase().as_str() {
+        "long" => MarketSentiment::Long,
+        "short" => MarketSentiment::Short,
+        "flat" => MarketSentiment::Flat,
+        _ => return Err(TradingError::ParseError("Invalid sentiment".to_string())),
+    };
+
+    info!(?action, ?sentiment, "Parsed signal");
 
     match (&action, &sentiment) {
-        (Action::Buy, Sentiment::Long) => {
-            info!("信号=开多仓");
-            do_long(&state).await?;
-        }
-        (Action::Sell, Sentiment::Long) => {
-            info!("信号=平多头");
-            do_close_position(&state).await?;
-        }
-        (Action::Sell, Sentiment::Short) => {
-            info!("信号=开空仓");
-            do_short(&state).await?;
-        }
-        (_, Sentiment::Flat) => {
-            info!("信号=平仓");
-            do_close_position(&state).await?;
-        }
+        (TradeAction::Buy, MarketSentiment::Long) => do_long(&state).await?,
+        (TradeAction::Sell, MarketSentiment::Short) => do_short(&state).await?,
+        (_, MarketSentiment::Flat) => do_close(&state).await?,
         _ => {
-            warn!(?action, ?sentiment, "未识别的交易信号组合");
-            return Ok(Json(ApiResponse {
+            warn!(?action, ?sentiment, "Unknown signal combination");
+            return Ok(Json(WebApiResponse {
                 status: "success",
-                message: Some("unknown signal, ignored".to_string()),
+                message: Some("Unknown signal combination".to_string()),
             }));
         }
     }
 
-    Ok(Json(ApiResponse {
+    Ok(Json(WebApiResponse {
         status: "success",
         message: None,
     }))
 }
 
-/// 测试用端点
-async fn webhook_test_handler(Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
-    info!("收到测试信号: {:?}", payload);
+async fn webhook_test_handler(
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    info!("Test webhook received: {:?}", payload);
     (
         StatusCode::OK,
-        Json(ApiResponse {
+        Json(WebApiResponse {
             status: "success",
             message: None,
         }),
     )
 }
 
-/// 解析 Action
-fn parse_action(s: &str) -> Result<Action, TradingError> {
-    match s.to_lowercase().as_str() {
-        "buy" => Ok(Action::Buy),
-        "sell" => Ok(Action::Sell),
-        _ => Err(TradingError::ParseError(format!("无效 action: {}", s))),
-    }
-}
-
-/// 解析 Sentiment
-fn parse_sentiment(s: &str) -> Result<Sentiment, TradingError> {
-    match s.to_lowercase().as_str() {
-        "long" => Ok(Sentiment::Long),
-        "short" => Ok(Sentiment::Short),
-        "flat" => Ok(Sentiment::Flat),
-        _ => Err(TradingError::ParseError(format!("无效 sentiment: {}", s))),
-    }
-}
-
-/// ==================== 主函数 ====================
+/// ==================== Main ====================
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 初始化日志
     let subscriber = FmtSubscriber::builder()
         .with_max_level(tracing::Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("启动中...");
+    info!("Starting server...");
 
-    // 加载配置
     let config = Arc::new(Config::from_env()?);
-
     let (quote_ctx, _) = QuoteContext::try_new(config.clone()).await?;
     let (trade_ctx, _) = TradeContext::try_new(config).await?;
 
-    let app_state = Arc::new(Mutex::new(AppState {
+    let state = Arc::new(Mutex::new(AppState {
         quote_ctx: Arc::new(quote_ctx),
         trade_ctx: Arc::new(trade_ctx),
     }));
 
-    // 构建路由
     let app = Router::new()
         .route("/webhook", post(webhook_handler))
         .route("/webhook_test", post(webhook_test_handler))
         .route("/health", get(|| async { "OK" }))
-        .with_state(app_state)
+        .with_state(state)
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_methods([http::Method::POST])
@@ -575,12 +461,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
-    info!("服务启动成功，监听地址: {}", addr);
+    info!("Listening on: {}", addr);
 
-    // Create TcpListener
-    let listener = TcpListener::bind(&addr).await.unwrap();
-    // Start server
-    axum::serve(listener, app).await.unwrap();
+    let listener = TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
