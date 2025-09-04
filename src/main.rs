@@ -23,8 +23,8 @@ use tracing_subscriber::FmtSubscriber;
 /// ==================== Constants ====================
 const SYMBOL_LONG: &str = "TSLL.US";
 const SYMBOL_SHORT: &str = "TSLQ.US";
-const DEFAULT_PURCHASE_RATIO: f64 = 0.5;
-const DEFAULT_SELL_RATIO: f64 = 0.5;
+const DEFAULT_PURCHASE_RATIO: f64 = 0.5; // 每次都半仓买入
+const DEFAULT_SELL_RATIO: f64 = 0.5;     // 每次都半仓卖出
 const RETRY_COUNT: usize = 5;
 const RETRY_DELAY_SECS: u64 = 10;
 const ORDER_WAIT_SECS: u64 = 30;
@@ -69,8 +69,6 @@ enum TradingError {
     ParseError(String),
     #[error("Quote retrieval error: {0}")]
     QuoteError(String),
-    #[error("Trade execution error: {0}")]
-    TradeError(String),
     #[error("SDK or network error: {0}")]
     SdkError(String),
 }
@@ -119,21 +117,6 @@ fn is_order_terminal(status: &OrderStatus) -> bool {
     )
 }
 
-/// ==================== Quote Utilities ====================
-async fn get_ask_price(ctx: &QuoteContext, symbol: &str) -> Option<Decimal> {
-    ctx.depth(symbol)
-        .await
-        .ok()
-        .and_then(|depth| depth.asks.first()?.price)
-}
-
-async fn get_bid_price(ctx: &QuoteContext, symbol: &str) -> Option<Decimal> {
-    ctx.depth(symbol)
-        .await
-        .ok()
-        .and_then(|depth| depth.bids.first()?.price)
-}
-
 /// ==================== Order Builders ====================
 fn build_limit_order(
     symbol: &str,
@@ -152,6 +135,115 @@ fn build_limit_order(
     }
 
     order
+}
+
+/// ==================== Quote Utilities ====================
+async fn get_ask_price(ctx: &QuoteContext, symbol: &str) -> Option<Decimal> {
+    ctx.depth(symbol)
+        .await
+        .ok()
+        .and_then(|depth| depth.asks.first()?.price)
+}
+
+async fn get_bid_price(ctx: &QuoteContext, symbol: &str) -> Option<Decimal> {
+    ctx.depth(symbol)
+        .await
+        .ok()
+        .and_then(|depth| depth.bids.first()?.price)
+}
+
+/// ==================== Buy Task (Background) ====================
+async fn buy_background_task(
+    trade_ctx: Arc<TradeContext>,
+    quote_ctx: Arc<QuoteContext>,
+    symbol: String,
+    target_quantity: Decimal,
+    max_retries: usize,
+    retry_delay: Duration,
+) {
+    let mut remaining = target_quantity;
+    let mut attempt = 0;
+
+    info!(
+        symbol,
+        quantity = %target_quantity,
+        "Starting buy background task with max retries: {}",
+        max_retries
+    );
+
+    while remaining >= decimal!(1) && attempt < max_retries {
+        attempt += 1;
+        info!(symbol, attempt, remaining = %remaining, "Attempt {} to buy", attempt);
+
+        let price = match get_ask_price(&quote_ctx, &symbol).await {
+            Some(p) => p,
+            None => {
+                warn!(symbol, "Failed to get ask price, retrying...");
+                sleep(retry_delay).await;
+                continue;
+            }
+        };
+
+        let remark = if symbol == SYMBOL_LONG {
+            "Open Long"
+        } else {
+            "Open Short"
+        };
+
+        let order = build_limit_order(&symbol, OrderSide::Buy, remaining, price, Some(remark));
+
+        let order_id = match trade_ctx.submit_order(order).await {
+            Ok(resp) => resp.order_id,
+            Err(e) => {
+                warn!(symbol, error = %e, "Submit buy order failed");
+                sleep(retry_delay).await;
+                continue;
+            }
+        };
+
+        info!(order_id = %order_id, "Buy order submitted");
+
+        sleep(Duration::from_secs(ORDER_WAIT_SECS)).await;
+
+        let order_detail = match trade_ctx.order_detail(&order_id).await {
+            Ok(detail) => detail,
+            Err(e) => {
+                warn!(order_id = %order_id, error = %e, "Failed to fetch order detail");
+                sleep(retry_delay).await;
+                continue;
+            }
+        };
+
+        let filled = order_detail.executed_quantity;
+        remaining = (remaining - filled).max(decimal!(0));
+
+        match order_detail.status {
+            OrderStatus::Filled => info!(order_id = %order_id, "Order fully filled"),
+            OrderStatus::PartialFilled if remaining < decimal!(1) => {
+                info!(order_id = %order_id, filled = %filled, "Partially filled, less than 1 unit, stop");
+            }
+            OrderStatus::PartialFilled => {
+                info!(order_id = %order_id, filled = %filled, remaining = %remaining, "Partially filled, continue");
+            }
+            status if is_order_terminal(&status) => {
+                warn!(order_id = %order_id, ?status, "Order in terminal state");
+            }
+            _ => {
+                if is_order_active_and_cancellable(&order_detail.status) {
+                    info!(order_id = %order_id, "Cancelling unfilled order");
+                    let _ = trade_ctx.cancel_order(&order_id).await;
+                }
+            }
+        }
+
+        sleep(retry_delay).await;
+    }
+
+    if remaining >= decimal!(1) {
+        error!(symbol, remaining = %remaining, "Buy task failed after retries");
+    } else {
+        info!(symbol, "Buy task completed successfully");
+    }
 }
 
 /// ==================== Sell Task (Background) ====================
@@ -249,8 +341,8 @@ async fn sell_background_task(
 
 /// ==================== Buy Logic ====================
 async fn buy_position(
-    trade_ctx: &TradeContext,
-    quote_ctx: &QuoteContext,
+    trade_ctx: Arc<TradeContext>,
+    quote_ctx: Arc<QuoteContext>,
     symbol: &str,
 ) -> Result<(), TradingError> {
     let ratio: f64 = env::var("MAX_PURCHASE_RATIO")
@@ -258,7 +350,7 @@ async fn buy_position(
         .parse()
         .unwrap_or(DEFAULT_PURCHASE_RATIO);
 
-    let price = get_ask_price(quote_ctx, symbol)
+    let price = get_ask_price(&quote_ctx, symbol)
         .await
         .ok_or_else(|| TradingError::QuoteError("Failed to get ask price".to_string()))?;
 
@@ -277,41 +369,17 @@ async fn buy_position(
         return Ok(());
     }
 
-    info!(symbol, price = %price, quantity = %quantity, "Submitting buy order");
+    // 启动后台买入任务
+    tokio::spawn(buy_background_task(
+        trade_ctx,
+        quote_ctx,
+        symbol.to_string(),
+        quantity,
+        RETRY_COUNT,
+        Duration::from_secs(RETRY_DELAY_SECS),
+    ));
 
-    let remark = if symbol == SYMBOL_LONG {
-        "Open Long"
-    } else {
-        "Open Short"
-    };
-    let order = build_limit_order(symbol, OrderSide::Buy, quantity, price, Some(remark));
-
-    let resp = trade_ctx
-        .submit_order(order)
-        .await
-        .map_err(|e| TradingError::TradeError(format!("Buy order failed: {}", e)))?;
-
-    let order_id = resp.order_id.clone();
-    info!(order_id = %order_id, "Buy order submitted");
-
-    let trade_ctx_clone = trade_ctx.clone();
-    tokio::spawn(async move {
-        sleep(Duration::from_secs(ORDER_WAIT_SECS)).await;
-        match trade_ctx_clone.order_detail(&order_id).await {
-            Ok(order) => {
-                if is_order_terminal(&order.status) {
-                    debug!(order_id = %order_id, "Order already terminal");
-                } else if is_order_active_and_cancellable(&order.status) {
-                    info!(order_id = %order_id, "Cancelling unfilled order");
-                    if let Err(e) = trade_ctx_clone.cancel_order(&order_id).await {
-                        error!(order_id = %order_id, error = %e, "Cancel order failed");
-                    }
-                }
-            }
-            Err(e) => error!(order_id = %order_id, error = %e, "Failed to fetch order"),
-        }
-    });
-
+    info!(symbol, quantity = %quantity, "Buy task started in background");
     Ok(())
 }
 
@@ -345,12 +413,22 @@ async fn sell_position(
 /// ==================== Trade Actions ====================
 async fn do_long(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
     let state = state.lock().await;
-    buy_position(&state.trade_ctx, &state.quote_ctx, SYMBOL_LONG).await
+    buy_position(
+        Arc::clone(&state.trade_ctx),
+        Arc::clone(&state.quote_ctx),
+        SYMBOL_LONG,
+    )
+    .await
 }
 
 async fn do_short(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
     let state = state.lock().await;
-    buy_position(&state.trade_ctx, &state.quote_ctx, SYMBOL_SHORT).await
+    buy_position(
+        Arc::clone(&state.trade_ctx),
+        Arc::clone(&state.quote_ctx),
+        SYMBOL_SHORT,
+    )
+    .await
 }
 
 async fn do_close_long(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {

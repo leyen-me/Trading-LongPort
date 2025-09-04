@@ -1,0 +1,88 @@
+//@version=5
+strategy(title = "ThreeB",
+     shorttitle = "ThreeB",
+     overlay = true,
+     initial_capital = 10000,
+     commission_type = strategy.commission.percent, 
+     commission_value = 0.01,
+     calc_on_every_tick = false, 
+     process_orders_on_close = true,
+     pyramiding = 0, 
+     default_qty_type = strategy.percent_of_equity, 
+     default_qty_value = 95)
+
+// === 输入参数 ===
+volumeFilter = input.bool(true, "启用成交量过滤")
+minVolRatio = input.float(1.1, "最小放量比例", minval=1.0, step=0.1)
+slOffsetPct = input.float(0.1, "止损额外缓冲 (%)", minval=0.0, step=0.05) // 防止滑点触发
+
+// === K线判断 ===
+isGreen = close > open
+isRed = close < open
+
+// === 三连阳：Three White Soldiers ===
+threeGreen = 
+     isGreen and isGreen[1] and isGreen[2] and
+     close > close[1] and close[1] > close[2] and          // 收盘递增
+     open < close[1] and open[1] < close[2]               // 开盘在前一根实体内
+
+volUpGreen = volume > volume[1] * minVolRatio and volume[1] > volume[2] * minVolRatio
+threeGreenSignal = threeGreen and (not volumeFilter ? true : volUpGreen)
+
+// === 三连阴：Three Black Crows ===
+threeRed = 
+     isRed and isRed[1] and isRed[2] and
+     close < close[1] and close[1] < close[2] and
+     open > close[1] and open[1] > close[2]
+
+volUpRed = volume > volume[1] * minVolRatio and volume[1] > volume[2] * minVolRatio
+threeRedSignal = threeRed and (not volumeFilter ? true : volUpRed)
+
+// === 动态计算止损止盈距离（基于第一根和第三根K线）===
+
+// 三连阳：做多
+var float longEntry = na
+var float longStop = na
+var float longTarget = na
+
+if (threeGreenSignal)
+    firstLow = low[2]      // 第一根阳线最低价
+    thirdHigh = high       // 第三根阳线最高价
+    risk = firstLow * (1 - slOffsetPct / 100)  // 加一点缓冲，防止下影线误触发
+    reward = close + (thirdHigh - firstLow)    // 1:1 目标
+
+    longEntry := close
+    longStop := math.min(firstLow, low[2])     // 保守取第一根最低
+    longTarget := reward
+
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", from_entry="Long", stop=longStop, limit=longTarget)
+
+// 三连阴：做空
+var float shortEntry = na
+var float shortStop = na
+var float shortTarget = na
+
+if (threeRedSignal)
+    firstHigh = high[2]    // 第一根阴线最高价
+    thirdLow = low         // 第三根阴线最低价
+    risk = firstHigh * (1 + slOffsetPct / 100)
+    reward = close - (firstHigh - thirdLow)
+
+    shortEntry := close
+    shortStop := math.max(firstHigh, high[2])
+    shortTarget := reward
+
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", from_entry="Short", stop=shortStop, limit=shortTarget)
+
+// === 绘图提示 ===
+plotshape(threeGreenSignal, location=location.belowbar, color=color.lime, style=shape.labelup, text="3↑", title="三连阳")
+plotshape(threeRedSignal, location=location.abovebar, color=color.red, style=shape.labeldown, text="3↓", title="三连阴")
+
+// 可选：画出止损止盈线（仅最后信号）
+plot(threeGreenSignal ? longStop : na, color=color.red, style=plot.style_cross, linewidth=2, title="多头止损")
+plot(threeGreenSignal ? longTarget : na, color=color.green, style=plot.style_cross, linewidth=2, title="多头目标")
+
+plot(threeRedSignal ? shortStop : na, color=color.fuchsia, style=plot.style_cross, linewidth=2, title="空头止损")
+plot(threeRedSignal ? shortTarget : na, color=color.orange, style=plot.style_cross, linewidth=2, title="空头目标")
