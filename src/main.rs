@@ -10,6 +10,7 @@ use longport::{
     },
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,13 +22,21 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 /// ==================== Constants ====================
-const SYMBOL_LONG: &str = "TSLL.US";
-const SYMBOL_SHORT: &str = "TSLQ.US";
 const DEFAULT_PURCHASE_RATIO: f64 = 0.5; // 每次都半仓买入
-const DEFAULT_SELL_RATIO: f64 = 0.5;     // 每次都半仓卖出
+const DEFAULT_SELL_RATIO: f64 = 0.5; // 每次都半仓卖出
 const RETRY_COUNT: usize = 5;
 const RETRY_DELAY_SECS: u64 = 10;
 const ORDER_WAIT_SECS: u64 = 30;
+
+/// Symbol mapping config
+/// 股票代码映射，例如你的Webhook监听的 TSLA 发出的信号，需要对 TSLA 做多或者做空（靠ETF实现）
+fn symbol_mapping() -> HashMap<&'static str, (&'static str, &'static str)> {
+    let mut m = HashMap::new();
+    m.insert("TSLA", ("TSLL.US", "TSLQ.US"));
+    m.insert("TSLL", ("TSLL.US", "TSLQ.US"));
+    m.insert("NVDA", ("NVDL.US", "NVDS.US"));
+    m
+}
 
 /// ==================== Enums ====================
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +57,7 @@ enum MarketSentiment {
 struct WebhookRequest {
     action: String,
     sentiment: String,
+    ticker: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -117,23 +127,21 @@ fn is_order_terminal(status: &OrderStatus) -> bool {
     )
 }
 
+fn get_symbols_for_ticker(ticker: &str) -> Option<(&'static str, &'static str)> {
+    symbol_mapping().get(ticker).copied()
+}
+
 /// ==================== Order Builders ====================
 fn build_limit_order(
     symbol: &str,
     side: OrderSide,
     quantity: Decimal,
     price: Decimal,
-    remark: Option<&str>,
 ) -> SubmitOrderOptions {
-    let mut order =
+    let order =
         SubmitOrderOptions::new(symbol, OrderType::LO, side, quantity, TimeInForceType::Day)
             .submitted_price(price)
             .outside_rth(OutsideRTH::AnyTime);
-
-    if let Some(remark) = remark {
-        order = order.remark(remark);
-    }
-
     order
 }
 
@@ -184,13 +192,7 @@ async fn buy_background_task(
             }
         };
 
-        let remark = if symbol == SYMBOL_LONG {
-            "Open Long"
-        } else {
-            "Open Short"
-        };
-
-        let order = build_limit_order(&symbol, OrderSide::Buy, remaining, price, Some(remark));
+        let order = build_limit_order(&symbol, OrderSide::Buy, remaining, price);
 
         let order_id = match trade_ctx.submit_order(order).await {
             Ok(resp) => resp.order_id,
@@ -278,12 +280,7 @@ async fn sell_background_task(
             }
         };
 
-        let remark = if symbol == SYMBOL_LONG {
-            "Close Long"
-        } else {
-            "Close Short"
-        };
-        let order = build_limit_order(&symbol, OrderSide::Sell, remaining, price, Some(remark));
+        let order = build_limit_order(&symbol, OrderSide::Sell, remaining, price);
 
         let order_id = match trade_ctx.submit_order(order).await {
             Ok(resp) => resp.order_id,
@@ -411,27 +408,27 @@ async fn sell_position(
 }
 
 /// ==================== Trade Actions ====================
-async fn do_long(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
+async fn do_long(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), TradingError> {
     let state = state.lock().await;
     buy_position(
         Arc::clone(&state.trade_ctx),
         Arc::clone(&state.quote_ctx),
-        SYMBOL_LONG,
+        symbol,
     )
     .await
 }
 
-async fn do_short(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
+async fn do_short(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), TradingError> {
     let state = state.lock().await;
     buy_position(
         Arc::clone(&state.trade_ctx),
         Arc::clone(&state.quote_ctx),
-        SYMBOL_SHORT,
+        symbol,
     )
     .await
 }
 
-async fn do_close_long(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
+async fn do_close_long(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), TradingError> {
     let state = state.lock().await;
     let resp = state
         .trade_ctx
@@ -441,7 +438,7 @@ async fn do_close_long(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError>
 
     for channel in resp.channels {
         for pos in channel.positions {
-            if ![SYMBOL_LONG].contains(&pos.symbol.as_str()) {
+            if ![symbol].contains(&pos.symbol.as_str()) {
                 debug!(symbol = %pos.symbol, "Ignored non-target symbol");
                 continue;
             }
@@ -461,7 +458,7 @@ async fn do_close_long(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError>
     Ok(())
 }
 
-async fn do_close_short(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
+async fn do_close_short(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), TradingError> {
     let state = state.lock().await;
     let resp = state
         .trade_ctx
@@ -471,7 +468,7 @@ async fn do_close_short(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError
 
     for channel in resp.channels {
         for pos in channel.positions {
-            if ![SYMBOL_SHORT].contains(&pos.symbol.as_str()) {
+            if ![symbol].contains(&pos.symbol.as_str()) {
                 debug!(symbol = %pos.symbol, "Ignored non-target symbol");
                 continue;
             }
@@ -511,13 +508,17 @@ async fn webhook_handler(
         _ => return Err(TradingError::ParseError("Invalid sentiment".to_string())),
     };
 
-    info!(?action, ?sentiment, "Parsed signal");
+    let ticker = payload.ticker;
+    let (long_symbol, short_symbol) = get_symbols_for_ticker(&ticker)
+        .ok_or_else(|| TradingError::ParseError(format!("Unknown ticker: {}", ticker)))?;
+
+    info!(?action, ?sentiment, ticker, "Parsed signal");
 
     match (&action, &sentiment) {
-        (TradeAction::Buy, MarketSentiment::Long) => do_long(&state).await?,
-        (TradeAction::Sell, MarketSentiment::Short) => do_short(&state).await?,
-        (TradeAction::Buy, MarketSentiment::Flat) => do_close_long(&state).await?,
-        (TradeAction::Sell, MarketSentiment::Flat) => do_close_short(&state).await?,
+        (TradeAction::Buy, MarketSentiment::Long) => do_long(&state, long_symbol).await?,
+        (TradeAction::Sell, MarketSentiment::Short) => do_short(&state, short_symbol).await?,
+        (TradeAction::Buy, MarketSentiment::Flat) => do_close_long(&state, long_symbol).await?,
+        (TradeAction::Sell, MarketSentiment::Flat) => do_close_short(&state, short_symbol).await?,
         _ => {
             warn!(?action, ?sentiment, "Unknown signal combination");
             return Ok(Json(WebApiResponse {
