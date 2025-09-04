@@ -428,7 +428,11 @@ async fn do_short(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), Trad
     .await
 }
 
-async fn do_close_long(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), TradingError> {
+async fn do_close_all(
+    state: &Arc<Mutex<AppState>>,
+    long_symbol: &str,
+    short_symbol: &str,
+) -> Result<(), TradingError> {
     let state = state.lock().await;
     let resp = state
         .trade_ctx
@@ -438,37 +442,7 @@ async fn do_close_long(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(),
 
     for channel in resp.channels {
         for pos in channel.positions {
-            if ![symbol].contains(&pos.symbol.as_str()) {
-                debug!(symbol = %pos.symbol, "Ignored non-target symbol");
-                continue;
-            }
-
-            let trade_ctx = Arc::clone(&state.trade_ctx);
-            let quote_ctx = Arc::clone(&state.quote_ctx);
-
-            tokio::spawn(async move {
-                if let Err(e) = sell_position(trade_ctx, quote_ctx, &pos.symbol, pos.quantity).await
-                {
-                    error!(error = %e, "Close position task failed");
-                }
-            });
-        }
-    }
-
-    Ok(())
-}
-
-async fn do_close_short(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), TradingError> {
-    let state = state.lock().await;
-    let resp = state
-        .trade_ctx
-        .stock_positions(None)
-        .await
-        .map_err(|e| TradingError::SdkError(e.to_string()))?;
-
-    for channel in resp.channels {
-        for pos in channel.positions {
-            if ![symbol].contains(&pos.symbol.as_str()) {
+            if ![long_symbol, short_symbol].contains(&pos.symbol.as_str()) {
                 debug!(symbol = %pos.symbol, "Ignored non-target symbol");
                 continue;
             }
@@ -489,7 +463,7 @@ async fn do_close_short(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<()
 }
 
 /// ==================== Webhook Handlers ====================
-/// 
+///
 /// {
 ///    "ticker": "{{ticker}}",
 ///    "time": "{{time}}",
@@ -526,8 +500,7 @@ async fn webhook_handler(
     match (&action, &sentiment) {
         (TradeAction::Buy, MarketSentiment::Long) => do_long(&state, long_symbol).await?,
         (TradeAction::Sell, MarketSentiment::Short) => do_short(&state, short_symbol).await?,
-        (TradeAction::Buy, MarketSentiment::Flat) => do_close_long(&state, long_symbol).await?,
-        (TradeAction::Sell, MarketSentiment::Flat) => do_close_short(&state, short_symbol).await?,
+        (_, MarketSentiment::Flat) => do_close_all(&state, long_symbol, short_symbol).await?,
         _ => {
             warn!(?action, ?sentiment, "Unknown signal combination");
             return Ok(Json(WebApiResponse {
