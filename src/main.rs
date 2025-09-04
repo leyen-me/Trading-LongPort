@@ -4,7 +4,10 @@ use longport::Decimal;
 use longport::{
     Config, decimal,
     quote::QuoteContext,
-    trade::{ EstimateMaxPurchaseQuantityOptions, OrderSide, OrderStatus, OrderType, OutsideRTH, SubmitOrderOptions, TimeInForceType, TradeContext },
+    trade::{
+        EstimateMaxPurchaseQuantityOptions, OrderSide, OrderStatus, OrderType, OutsideRTH,
+        SubmitOrderOptions, TimeInForceType, TradeContext,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -139,15 +142,10 @@ fn build_limit_order(
     price: Decimal,
     remark: Option<&str>,
 ) -> SubmitOrderOptions {
-    let mut order = SubmitOrderOptions::new(
-        symbol,
-        OrderType::LO,
-        side,
-        quantity,
-        TimeInForceType::Day,
-    )
-    .submitted_price(price)
-    .outside_rth(OutsideRTH::AnyTime);
+    let mut order =
+        SubmitOrderOptions::new(symbol, OrderType::LO, side, quantity, TimeInForceType::Day)
+            .submitted_price(price)
+            .outside_rth(OutsideRTH::AnyTime);
 
     if let Some(remark) = remark {
         order = order.remark(remark);
@@ -188,7 +186,11 @@ async fn sell_background_task(
             }
         };
 
-        let remark = if symbol == SYMBOL_LONG { "Close Long" } else { "Close Short" };
+        let remark = if symbol == SYMBOL_LONG {
+            "Close Long"
+        } else {
+            "Close Short"
+        };
         let order = build_limit_order(&symbol, OrderSide::Sell, remaining, price, Some(remark));
 
         let order_id = match trade_ctx.submit_order(order).await {
@@ -260,8 +262,8 @@ async fn buy_position(
         .await
         .ok_or_else(|| TradingError::QuoteError("Failed to get ask price".to_string()))?;
 
-    let opts = EstimateMaxPurchaseQuantityOptions::new(symbol, OrderType::LO, OrderSide::Buy)
-        .price(price);
+    let opts =
+        EstimateMaxPurchaseQuantityOptions::new(symbol, OrderType::LO, OrderSide::Buy).price(price);
 
     let estimate = trade_ctx
         .estimate_max_purchase_quantity(opts)
@@ -277,7 +279,11 @@ async fn buy_position(
 
     info!(symbol, price = %price, quantity = %quantity, "Submitting buy order");
 
-    let remark = if symbol == SYMBOL_LONG { "Open Long" } else { "Open Short" };
+    let remark = if symbol == SYMBOL_LONG {
+        "Open Long"
+    } else {
+        "Open Short"
+    };
     let order = build_limit_order(symbol, OrderSide::Buy, quantity, price, Some(remark));
 
     let resp = trade_ctx
@@ -347,7 +353,7 @@ async fn do_short(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
     buy_position(&state.trade_ctx, &state.quote_ctx, SYMBOL_SHORT).await
 }
 
-async fn do_close(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
+async fn do_close_long(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
     let state = state.lock().await;
     let resp = state
         .trade_ctx
@@ -357,7 +363,7 @@ async fn do_close(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
 
     for channel in resp.channels {
         for pos in channel.positions {
-            if ![SYMBOL_LONG, SYMBOL_SHORT].contains(&pos.symbol.as_str()) {
+            if ![SYMBOL_LONG].contains(&pos.symbol.as_str()) {
                 debug!(symbol = %pos.symbol, "Ignored non-target symbol");
                 continue;
             }
@@ -366,7 +372,38 @@ async fn do_close(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
             let quote_ctx = Arc::clone(&state.quote_ctx);
 
             tokio::spawn(async move {
-                if let Err(e) = sell_position(trade_ctx, quote_ctx, &pos.symbol, pos.quantity).await {
+                if let Err(e) = sell_position(trade_ctx, quote_ctx, &pos.symbol, pos.quantity).await
+                {
+                    error!(error = %e, "Close position task failed");
+                }
+            });
+        }
+    }
+
+    Ok(())
+}
+
+async fn do_close_short(state: &Arc<Mutex<AppState>>) -> Result<(), TradingError> {
+    let state = state.lock().await;
+    let resp = state
+        .trade_ctx
+        .stock_positions(None)
+        .await
+        .map_err(|e| TradingError::SdkError(e.to_string()))?;
+
+    for channel in resp.channels {
+        for pos in channel.positions {
+            if ![SYMBOL_SHORT].contains(&pos.symbol.as_str()) {
+                debug!(symbol = %pos.symbol, "Ignored non-target symbol");
+                continue;
+            }
+
+            let trade_ctx = Arc::clone(&state.trade_ctx);
+            let quote_ctx = Arc::clone(&state.quote_ctx);
+
+            tokio::spawn(async move {
+                if let Err(e) = sell_position(trade_ctx, quote_ctx, &pos.symbol, pos.quantity).await
+                {
                     error!(error = %e, "Close position task failed");
                 }
             });
@@ -401,7 +438,8 @@ async fn webhook_handler(
     match (&action, &sentiment) {
         (TradeAction::Buy, MarketSentiment::Long) => do_long(&state).await?,
         (TradeAction::Sell, MarketSentiment::Short) => do_short(&state).await?,
-        (_, MarketSentiment::Flat) => do_close(&state).await?,
+        (TradeAction::Buy, MarketSentiment::Flat) => do_close_long(&state).await?,
+        (TradeAction::Sell, MarketSentiment::Flat) => do_close_short(&state).await?,
         _ => {
             warn!(?action, ?sentiment, "Unknown signal combination");
             return Ok(Json(WebApiResponse {
@@ -417,9 +455,7 @@ async fn webhook_handler(
     }))
 }
 
-async fn webhook_test_handler(
-    Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
+async fn webhook_test_handler(Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
     info!("Test webhook received: {:?}", payload);
     (
         StatusCode::OK,
