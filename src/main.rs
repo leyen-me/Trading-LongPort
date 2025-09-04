@@ -489,6 +489,15 @@ async fn do_close_short(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<()
 }
 
 /// ==================== Webhook Handlers ====================
+/// 
+/// {
+///    "ticker": "{{ticker}}",
+///    "time": "{{time}}",
+///    "action": "{{strategy.order.action}}",
+///    "sentiment": "{{strategy.market_position}}",
+///    "price": "{{strategy.order.price}}"
+/// }
+///
 async fn webhook_handler(
     state: axum::extract::State<Arc<Mutex<AppState>>>,
     Json(payload): Json<WebhookRequest>,
