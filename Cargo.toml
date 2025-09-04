@@ -1,5 +1,5 @@
 [package]
-name = "vwap"
+name = "trading"
 version = "0.1.0"
 edition = "2024"
 
