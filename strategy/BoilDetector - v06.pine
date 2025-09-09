@@ -1,0 +1,240 @@
+//@version=6
+strategy(title = "盘整突破交易系统", shorttitle = "盘整破位", overlay = true, initial_capital = 10000, max_bars_back = 5000, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = true, process_orders_on_close = false, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 90)
+
+// ================================
+// 参数设置区
+// ================================
+
+// 核心逻辑参数
+grpCore = "核心逻辑"
+inputWindowSize = input.int(12, "盘整检测窗口 N", minval = 5, group = grpCore, tooltip = "用于ATR、均量、实体均值等统计")
+inputConsolidationBarCount = input.int(8, "窄区间连续K线阈值", minval = 3, group = grpCore, tooltip = "连续多少根低波动K线可辅助判定为盘整")
+inputBoxTightRatio = input.float(1.4, "箱体紧致度系数", minval = 0.1, step = 0.1, maxval = 3, group = grpCore, tooltip = "箱体高度 < 平均真波幅 * 该系数 → 视为‘窄’")
+inputVolumeAvgLength = input.int(20, "均量周期", minval = 10, group = grpCore)
+
+// 突破判定参数
+grpBreak = "突破判定"
+inputBreakBufferPercent = input.float(0.003, "突破缓冲比例(±%)", step = 0.001, minval = 0.0, group = grpBreak, tooltip = "突破时允许的价格浮动缓冲，如0.3%")
+inputBodySizeMultiplier = input.float(1.5, "大实体倍数(相对近期均值)", minval = 1.0, step = 0.1, group = grpBreak)
+
+// 脉冲过滤参数（放量确认）
+grpPulse = "脉冲过滤"
+inputVolumeMultiplier = input.float(2.0, "放量倍数(当前/均量)", minval = 1.0, step = 0.1, group = grpPulse)
+inputZScoreLength = input.int(20, "Z-Score计算周期", minval = 10, group = grpPulse)
+inputZScoreThreshold = input.float(2.1, "Z-Score阈值", minval = 1.0, step = 0.1, group = grpPulse)
+
+// 风控与出场参数
+grpRisk = "风控与出场"
+inputAtrLength = input.int(30, "ATR长度", minval = 5, group = grpRisk)
+inputAtrStopLossMultiplier = input.float(1.4, "初始止损ATR倍数", minval = 0.5, step = 0.1, group = grpRisk)
+inputTsllAtrMultiplier = input.float(6.7, "跟踪止损ATR倍数", minval = 0.5, step = 0.1, group = grpRisk)
+inputRiskRewardRatio = input.float(6.2, "风险回报比(RR)", minval = 1.0, step = 0.1, group = grpRisk)
+
+// ================================
+// 基础指标计算
+// ================================
+
+// 计算ATR与真实波幅
+atr = ta.atr(inputAtrLength)
+trueRange = ta.tr(true)
+avgTrueRange = ta.sma(trueRange, inputWindowSize)  // N周期平均真实波幅
+
+// 实体大小（绝对值）
+candleBody = math.abs(close - open)
+avgCandleBody = ta.sma(candleBody, inputWindowSize)  // 近N根K线的平均实体
+
+// 成交量均线与波动统计
+volumeBaseline =  ta.ema(volume, inputVolumeAvgLength)
+volumeStdev = ta.stdev(volume, inputZScoreLength)
+
+// Z-Score: 衡量当前成交量是否显著偏离均值
+zLengthEmaVolume = ta.ema(volume, inputZScoreLength)
+zScore = volumeStdev == 0.0 ? 0.0 : (volume - zLengthEmaVolume) / volumeStdev
+
+// ================================
+// 盘整状态识别
+// ================================
+
+// 方法1：基于“箱体高度”是否紧致
+boxHigh_N = ta.highest(high, inputWindowSize)
+boxLow_N = ta.lowest(low, inputWindowSize)
+boxHeight = boxHigh_N - boxLow_N
+isBoxTight = boxHeight <= avgTrueRange * inputBoxTightRatio  // 箱体高度小于平均波幅的一定比例
+
+// 判定为盘整区：当前N根K线构成窄幅箱体
+isConsolidationByBox = isBoxTight
+
+// 方法2：行为周期辅助 —— 连续多根低波动K线
+isNarrowBar = trueRange <= avgTrueRange * inputBoxTightRatio
+narrowStreakLength = ta.barssince(not isNarrowBar)  // 当前连续窄K线数量
+isAssistedByNarrowStreak = narrowStreakLength >= inputConsolidationBarCount - 1
+
+// 综合判断：满足任一条件即视为“死水/盘整”
+isInConsolidation = isConsolidationByBox or isAssistedByNarrowStreak
+
+// 动态维护最近一次盘整区的高点和低点
+var float lastConsolidationHigh = na
+var float lastConsolidationLow = na
+var int   consolidationSetBarIndex = na  // 记录最后一次设置盘整区的K线索引
+
+if isInConsolidation
+    lastConsolidationHigh := boxHigh_N
+    lastConsolidationLow := boxLow_N
+    consolidationSetBarIndex := bar_index
+
+
+// ================================
+// 突破信号识别
+// ================================
+
+// 突破缓冲带（百分比）
+breakoutBufferUp = not na(lastConsolidationHigh) ? lastConsolidationHigh * inputBreakBufferPercent : high * inputBreakBufferPercent
+breakoutBufferDown = not na(lastConsolidationLow) ? lastConsolidationLow * inputBreakBufferPercent : low * inputBreakBufferPercent
+
+// 价格突破箱体边界（含缓冲）
+priceBreaksUp = not na(lastConsolidationHigh) and close > lastConsolidationHigh + breakoutBufferUp
+priceBreaksDown = not na(lastConsolidationLow) and close < lastConsolidationLow - breakoutBufferDown
+
+// 大实体确认
+isLargeBody = candleBody > avgCandleBody * inputBodySizeMultiplier
+isValidUpBody = isLargeBody and close > open  // 上涨且为阳线
+isValidDownBody = isLargeBody and close < open // 下跌且为阴线
+
+// 两根K线确认
+isConfirmedUp = priceBreaksUp and (close > close[1] and high > high[1])   // 当前K线比前一根更高
+isConfirmedDown = priceBreaksDown and (close < close[1] and low < low[1])
+
+
+// ================================
+// 脉冲确认（放量 + 显著Z-Score）
+// ================================
+
+// 放量且Z-Score达标，视为“脉冲式突破”
+isVolumePulse = volume >= volumeBaseline * inputVolumeMultiplier and zScore >= inputZScoreThreshold
+
+
+// ================================
+// 最终交易信号生成
+// ================================
+
+// 多头信号：确认向上突破 + 实体合格 + 放量脉冲
+buySignal = isConfirmedUp and isValidUpBody and isVolumePulse
+
+// 空头信号：确认向下突破 + 实体合格 + 放量脉冲
+sellSignal = isConfirmedDown and isValidDownBody and isVolumePulse
+
+
+// ================================
+// 风控：初始止损设定
+// ================================
+
+// 多头初始止损：取“盘整低点”或“ATR下轨”中较高者（更保守），防止过低
+initialStopLong = not na(lastConsolidationLow) ? lastConsolidationLow : na
+calcAtrStopLong = close - inputAtrStopLossMultiplier * atr
+entryStopLong = math.max(initialStopLong, calcAtrStopLong)
+
+// 空头初始止损：取“盘整高点”或“ATR上轨”中较低者
+initialStopShort = not na(lastConsolidationHigh) ? lastConsolidationHigh : na
+calcAtrStopShort = close + inputAtrStopLossMultiplier * atr
+entryStopShort = math.min(initialStopShort, calcAtrStopShort)
+
+// 保存入场时的止损价（避免后续变化）
+var float entryStopPriceLong = na
+var float entryStopPriceShort = na
+
+// 清理历史止损（无持仓时）
+if strategy.position_size == 0
+    entryStopPriceLong := na
+    entryStopPriceShort := na
+
+// 开仓逻辑
+if strategy.position_size == 0 and buySignal
+    if not na(entryStopLong) and entryStopLong < close
+        entryStopPriceLong := entryStopLong
+        strategy.entry("LONG", strategy.long)
+
+if strategy.position_size == 0 and sellSignal
+    if not na(entryStopShort) and entryStopShort > close
+        entryStopPriceShort := entryStopShort
+        strategy.entry("SHORT", strategy.short)
+
+
+// ================================
+// 跟踪止损 TSLL（Trailing Stop Loss Level）
+// ================================
+
+var float trailingStopLong = na
+var float trailingStopShort = na
+
+bool isInLongPosition = strategy.position_size > 0
+bool isInShortPosition = strategy.position_size < 0
+float avgEntryPrice = strategy.position_avg_price
+
+// 自定义回看周期：从开仓至今，或至少ATR周期
+barsSincePositionOpen = ta.barssince(strategy.position_size == 0)
+lookbackLength = na(barsSincePositionOpen) ? inputAtrLength : barsSincePositionOpen + 1
+
+// 多头TSLL：回看最高价 - 多倍ATR
+highestSinceEntry = ta.highest(high, lookbackLength)
+lowestSinceEntry = ta.lowest(low, lookbackLength)
+
+if isInLongPosition
+    trailingStopLong := highestSinceEntry - inputTsllAtrMultiplier * atr
+else
+    trailingStopLong := na
+
+if isInShortPosition
+    trailingStopShort := lowestSinceEntry + inputTsllAtrMultiplier * atr
+else
+    trailingStopShort := na
+
+
+// ================================
+// 止盈目标计算（基于RR风险回报比）
+// ================================
+
+// 实际承担的风险（每单位）
+riskPerLong = isInLongPosition ? (avgEntryPrice - (na(entryStopPriceLong) ? avgEntryPrice - inputAtrStopLossMultiplier * atr : entryStopPriceLong)) : na
+riskPerShort = isInShortPosition ? ((na(entryStopPriceShort) ? avgEntryPrice + inputAtrStopLossMultiplier * atr : entryStopPriceShort) - avgEntryPrice) : na
+
+takeProfitLong = isInLongPosition and not na(riskPerLong) ? avgEntryPrice + inputRiskRewardRatio * riskPerLong : na
+takeProfitShort = isInShortPosition and not na(riskPerShort) ? avgEntryPrice - inputRiskRewardRatio * riskPerShort : na
+
+
+// ================================
+// 出场条件判断
+// ================================
+
+// 多头出场条件
+bool shouldExitLongByTrailingStop = isInLongPosition and not na(trailingStopLong) and close < trailingStopLong
+bool shouldExitLongByInitialStop = isInLongPosition and not na(entryStopPriceLong) and close < entryStopPriceLong
+bool shouldExitLongByTakeProfit = isInLongPosition and not na(takeProfitLong) and close > takeProfitLong
+
+// 空头出场条件
+bool shouldExitShortByTrailingStop = isInShortPosition and not na(trailingStopShort) and close > trailingStopShort
+bool shouldExitShortByInitialStop = isInShortPosition and not na(entryStopPriceShort) and close > entryStopPriceShort
+bool shouldExitShortByTakeProfit = isInShortPosition and not na(takeProfitShort) and close < takeProfitShort
+
+
+// ================================
+// 执行出场（优先级：跟踪止损 > 初始止损 > 止盈）
+// ================================
+
+if shouldExitLongByTrailingStop or shouldExitLongByInitialStop or shouldExitLongByTakeProfit
+    exitReason = shouldExitLongByTrailingStop ? "跟踪止损" : shouldExitLongByInitialStop ? "初始止损" : "止盈达成"
+    strategy.close("LONG", comment = exitReason)
+
+if shouldExitShortByTrailingStop or shouldExitShortByInitialStop or shouldExitShortByTakeProfit
+    exitReason = shouldExitShortByTrailingStop ? "跟踪止损" : shouldExitShortByInitialStop ? "初始止损" : "止盈达成"
+    strategy.close("SHORT", comment = exitReason)
+
+
+// ================================
+// 信号后重置盘整区（防止重复触发）
+// ================================
+
+// 一旦发出突破信号，清除当前盘整区，等待新周期重新形成
+if buySignal or sellSignal
+    lastConsolidationHigh := na
+    lastConsolidationLow := na
+    consolidationSetBarIndex := na

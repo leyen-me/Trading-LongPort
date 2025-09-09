@@ -1,0 +1,51 @@
+// @version = 4
+strategy(title = "breaks", shorttitle = "breaks", overlay = true, initial_capital = 10000, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = false, process_orders_on_close = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 90)
+
+toggleBreaks = input(true, title="显示突破信号")
+leftBars = input(10, title="左侧柱数")
+rightBars = input(14, title="右侧柱数")
+volumeThresh = input(20, title="成交量阈值")
+
+// 止损设置
+stopLossPercent = input(2, type=input.float, step = 0.1, title="止损百分比 (%)")
+takeProfitPercent = input(7, type=input.float, step = 0.1, title="止盈百分比 (%)")
+
+highUsePivot = fixnan(pivothigh(leftBars, rightBars)[1])
+lowUsePivot = fixnan(pivotlow(leftBars, rightBars)[1])
+r1 = plot(highUsePivot, color=change(highUsePivot) ? na : #FF0000, linewidth=3, offset=-(rightBars+1), title="阻力位")
+s1 = plot(lowUsePivot, color=change(lowUsePivot) ? na : #233dee, linewidth=3, offset=-(rightBars+1), title="支撑位")
+
+// Volume %
+short = ema(volume, 5)
+long = ema(volume, 10)
+osc = 100 * (short - long) / long
+
+// 交易信号
+long_signal = crossover(close, highUsePivot) and not(open - low > close - open) and osc > volumeThresh
+short_signal = crossunder(close, lowUsePivot) and not(open - close < high - open) and osc > volumeThresh
+
+// 执行交易
+if long_signal and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long)
+
+if short_signal and strategy.position_size == 0
+    strategy.entry("SHORT", strategy.short)
+
+// 计算止损和止盈价格
+if (strategy.position_size > 0)
+    longStopPrice = strategy.position_avg_price * (1 - stopLossPercent / 100)
+    longTakeProfitPrice = strategy.position_avg_price * (1 + takeProfitPercent / 100)
+    strategy.exit("多单止损止盈", "LONG", stop=longStopPrice, limit=longTakeProfitPrice)
+
+if (strategy.position_size < 0)
+    shortStopPrice = strategy.position_avg_price * (1 + stopLossPercent / 100)
+    shortTakeProfitPrice = strategy.position_avg_price * (1 - takeProfitPercent / 100)
+    strategy.exit("空单止损止盈", "SHORT", stop=shortStopPrice, limit=shortTakeProfitPrice)
+
+// 绘制信号
+plotshape(toggleBreaks and short_signal, title="做空信号", text='S', style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, transp=0, size=size.tiny)
+plotshape(toggleBreaks and long_signal, title="做多信号", text='L', style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, transp=0, size=size.tiny)
+
+// 绘制牛熊吞没形态
+plotshape(toggleBreaks and crossover(close, highUsePivot) and open - low > close - open, title="牛市吞没", text='Bull Wick', style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, transp=0, size=size.tiny)
+plotshape(toggleBreaks and crossunder(close, lowUsePivot) and open - close < high - open, title="熊市吞没", text='Bear Wick', style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, transp=0, size=size.tiny) 

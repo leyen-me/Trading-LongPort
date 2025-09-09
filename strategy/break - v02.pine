@@ -1,0 +1,89 @@
+// @version=4
+strategy(title="breaks+", shorttitle="breaks+", overlay=true, initial_capital=10000,
+     commission_type=strategy.commission.percent, commission_value=0.01,
+     calc_on_every_tick=false, process_orders_on_close=true, pyramiding=0,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=50)
+
+// ====== 原有参数 ======
+toggleBreaks   = input(true,  title="显示突破信号")
+leftBars       = input(15,    title="左侧柱数")
+rightBars      = input(15,    title="右侧柱数")
+volumeThresh   = input(20,    title="成交量阈值")
+
+// ====== 风控参数 ======
+grpRisk                 = "风控参数"
+atrLen                  = input(12,  "ATR长度",                      minval=5, group=grpRisk)
+initSL_ATR_mult         = input(2, "初始止损 ATR 倍数",            step=0.1, group=grpRisk)
+trail_ATR_mult          = input(6.3, "跟踪止损 ATR 倍数",            step=0.1, group=grpRisk)
+riskReward              = input(6.4, "风险回报比 (RR)",              step=0.1, minval=1.0, group=grpRisk)
+
+// ====== 基础计算 ======
+highUsePivot = fixnan(pivothigh(leftBars, rightBars)[1])
+lowUsePivot  = fixnan(pivotlow(leftBars, rightBars)[1])
+r1 = plot(highUsePivot, color=change(highUsePivot) ? na : #FF0000, linewidth=3, offset=-(rightBars+1), title="阻力位")
+s1 = plot(lowUsePivot,  color=change(lowUsePivot)  ? na : #233dee, linewidth=3, offset=-(rightBars+1), title="支撑位")
+
+shortV = ema(volume, 5)
+longV  = ema(volume, 10)
+osc    = 100 * (shortV - longV) / longV
+
+// 交易信号（原逻辑）
+long_signal  = crossover(close, highUsePivot) and not(open - low > close - open) and osc > volumeThresh
+short_signal = crossunder(close, lowUsePivot) and not(open - close < high - open) and osc > volumeThresh
+
+// ====== ATR、开仓以来的高低 ======
+atrv = atr(atrLen)
+barsSinceFlat = barssince(strategy.position_size == 0)
+lookbackLen   = na(barsSinceFlat) ? atrLen : barsSinceFlat + 1
+hiSinceEntry  = highest(high, lookbackLen)
+loSinceEntry  = lowest(low,  lookbackLen)
+
+// ====== 初始止损（入场时锁定）======
+var float entrySL_Long  = na
+var float entrySL_Short = na
+
+// 每次空仓时清理
+if strategy.position_size == 0
+    entrySL_Long  := na
+    entrySL_Short := na
+
+// 预计算“候选初始止损”
+pivotSL_Long  = na(lowUsePivot)  ? close - initSL_ATR_mult * atrv : max(lowUsePivot,  close - initSL_ATR_mult * atrv)
+pivotSL_Short = na(highUsePivot) ? close + initSL_ATR_mult * atrv : min(highUsePivot, close + initSL_ATR_mult * atrv)
+
+// ====== 开仓并锁定初始止损价 ======
+if long_signal and strategy.position_size == 0
+    entrySL_Long := pivotSL_Long
+    strategy.entry("LONG", strategy.long)
+
+if short_signal and strategy.position_size == 0
+    entrySL_Short := pivotSL_Short
+    strategy.entry("SHORT", strategy.short)
+
+// ====== 跟踪止损（随行就市）======
+trailSL_Long  = strategy.position_size > 0  ? hiSinceEntry - trail_ATR_mult * atrv : na
+trailSL_Short = strategy.position_size < 0  ? loSinceEntry + trail_ATR_mult * atrv : na
+
+// ====== 止盈（基于RR）======
+avgEntry = strategy.position_avg_price
+risk_Long  = strategy.position_size > 0 and not na(entrySL_Long)  ? (avgEntry - entrySL_Long)  : na
+risk_Short = strategy.position_size < 0 and not na(entrySL_Short) ? (entrySL_Short - avgEntry) : na
+tp_Long    = strategy.position_size > 0 and not na(risk_Long)  ? avgEntry + riskReward * risk_Long  : na
+tp_Short   = strategy.position_size < 0 and not na(risk_Short) ? avgEntry - riskReward * risk_Short : na
+
+// ====== 出场判定（优先级：TS > 初始SL > TP）======
+exitLong_TS  = strategy.position_size > 0 and not na(trailSL_Long)  and close < trailSL_Long
+exitLong_ISL = strategy.position_size > 0 and not na(entrySL_Long)  and close < entrySL_Long
+exitLong_TP  = strategy.position_size > 0 and not na(tp_Long)       and close > tp_Long
+
+exitShort_TS  = strategy.position_size < 0 and not na(trailSL_Short) and close > trailSL_Short
+exitShort_ISL = strategy.position_size < 0 and not na(entrySL_Short) and close > entrySL_Short
+exitShort_TP  = strategy.position_size < 0 and not na(tp_Short)      and close < tp_Short
+
+if exitLong_TS or exitLong_ISL or exitLong_TP
+    commentLong = exitLong_TS ? "跟踪止损" : exitLong_ISL ? "初始止损" : "止盈达成"
+    strategy.close("LONG", comment=commentLong)
+
+if exitShort_TS or exitShort_ISL or exitShort_TP
+    commentShort = exitShort_TS ? "跟踪止损" : exitShort_ISL ? "初始止损" : "止盈达成"
+    strategy.close("SHORT", comment=commentShort)
