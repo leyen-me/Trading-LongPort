@@ -1,5 +1,5 @@
 //@version=6
-strategy(title = "盘整突破交易系统", shorttitle = "盘整破位", overlay = true, initial_capital = 10000, max_bars_back = 5000, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = true, process_orders_on_close = false, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 90)
+strategy(title = "盘整突破交易系统", shorttitle = "盘整破位", overlay = true, initial_capital = 10000, max_bars_back = 5000, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = false, process_orders_on_close = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 90)
 
 // ================================
 // 参数设置区
