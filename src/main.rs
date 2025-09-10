@@ -218,7 +218,7 @@ async fn send_email(
     body: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let smtp_username = "672228275@qq.com";
-    let smtp_password = env::var("SMTP_PASSWORD").map_err(|_| "SMTP_PASSWORD not set")?;
+    let smtp_password = env::var("SMTP_PASSWORD").map_err(|_| "环境变量 SMTP_PASSWORD 没有设置")?;
 
     let email = Message::builder()
         .from(Mailbox::new(
@@ -242,8 +242,8 @@ async fn send_email(
         .build();
 
     match mailer.send(&email) {
-        Ok(_) => info!("📧 Email sent successfully"),
-        Err(e) => error!("📧 Failed to send email: {}", e),
+        Ok(_) => info!("📧 邮件发送成功"),
+        Err(e) => error!("📧 邮件发送失败: {}", e),
     }
 
     Ok(())
@@ -279,18 +279,18 @@ async fn buy_background_task(
     info!(
         symbol,
         quantity = %target_quantity,
-        "Starting buy background task with max retries: {}",
+        "启动买入后台任务，最大重试次数：{}",
         max_retries
     );
 
     while remaining >= decimal!(1) && attempt < max_retries {
         attempt += 1;
-        info!(symbol, attempt, remaining = %remaining, "Attempt {} to buy", attempt);
+        info!(symbol, attempt, remaining = %remaining, "第 {} 次尝试买入", attempt);
 
         let price = match get_ask_price(&quote_ctx, &symbol).await {
             Some(p) => p,
             None => {
-                warn!(symbol, "Failed to get ask price, retrying...");
+                warn!(symbol, "获取卖一价失败，正在重试...");
                 sleep(retry_delay).await;
                 continue;
             }
@@ -301,20 +301,20 @@ async fn buy_background_task(
         let order_id = match trade_ctx.submit_order(order).await {
             Ok(resp) => resp.order_id,
             Err(e) => {
-                warn!(symbol, error = %e, "Submit buy order failed");
+                warn!(symbol, error = %e, "提交买入订单失败");
                 sleep(retry_delay).await;
                 continue;
             }
         };
 
-        info!(order_id = %order_id, "Buy order submitted");
+        info!(order_id = %order_id, "买入订单已提交");
 
         sleep(Duration::from_secs(ORDER_WAIT_SECS)).await;
 
         let order_detail = match trade_ctx.order_detail(&order_id).await {
             Ok(detail) => detail,
             Err(e) => {
-                warn!(order_id = %order_id, error = %e, "Failed to fetch order detail");
+                warn!(order_id = %order_id, error = %e, "获取订单详情失败");
                 sleep(retry_delay).await;
                 continue;
             }
@@ -324,19 +324,19 @@ async fn buy_background_task(
         remaining = (remaining - filled).max(decimal!(0));
 
         match order_detail.status {
-            OrderStatus::Filled => info!(order_id = %order_id, "Order fully filled"),
+            OrderStatus::Filled => info!(order_id = %order_id, "订单已全部成交"),
             OrderStatus::PartialFilled if remaining < decimal!(1) => {
-                info!(order_id = %order_id, filled = %filled, "Partially filled, less than 1 unit, stop");
+                info!(order_id = %order_id, filled = %filled, "部分成交，剩余不足1单位，停止重试");
             }
             OrderStatus::PartialFilled => {
-                info!(order_id = %order_id, filled = %filled, remaining = %remaining, "Partially filled, continue");
+                info!(order_id = %order_id, filled = %filled, remaining = %remaining, "部分成交，继续尝试");
             }
             status if is_order_terminal(&status) => {
-                warn!(order_id = %order_id, ?status, "Order in terminal state");
+                warn!(order_id = %order_id, ?status, "订单已进入终态，不再重试");
             }
             _ => {
                 if is_order_active_and_cancellable(&order_detail.status) {
-                    info!(order_id = %order_id, "Cancelling unfilled order");
+                    info!(order_id = %order_id, "正在取消未成交订单");
                     let _ = trade_ctx.cancel_order(&order_id).await;
                 }
             }
@@ -346,9 +346,9 @@ async fn buy_background_task(
     }
 
     if remaining >= decimal!(1) {
-        error!(symbol, remaining = %remaining, "Buy task failed after retries");
+        error!(symbol, remaining = %remaining, "买入任务在多次重试后仍失败");
     } else {
-        info!(symbol, "Buy task completed successfully");
+        info!(symbol, "买入任务执行完成");
     }
 }
 
@@ -367,18 +367,18 @@ async fn sell_background_task(
     info!(
         symbol,
         quantity = %target_quantity,
-        "Starting sell background task with max retries: {}",
+        "启动卖出后台任务，最大重试次数：{}",
         max_retries
     );
 
     while remaining >= decimal!(1) && attempt < max_retries {
         attempt += 1;
-        info!(symbol, attempt, remaining = %remaining, "Attempt {} to sell", attempt);
+        info!(symbol, attempt, remaining = %remaining, "第 {} 次尝试卖出", attempt);
 
         let price = match get_bid_price(&quote_ctx, &symbol).await {
             Some(p) => p,
             None => {
-                warn!(symbol, "Failed to get bid price, retrying...");
+                warn!(symbol, "获取买一价失败，正在重试...");
                 sleep(retry_delay).await;
                 continue;
             }
@@ -389,20 +389,20 @@ async fn sell_background_task(
         let order_id = match trade_ctx.submit_order(order).await {
             Ok(resp) => resp.order_id,
             Err(e) => {
-                warn!(symbol, error = %e, "Submit sell order failed");
+                warn!(symbol, error = %e, "提交卖出订单失败");
                 sleep(retry_delay).await;
                 continue;
             }
         };
 
-        info!(order_id = %order_id, "Sell order submitted");
+        info!(order_id = %order_id, "卖出订单已提交");
 
         sleep(Duration::from_secs(ORDER_WAIT_SECS)).await;
 
         let order_detail = match trade_ctx.order_detail(&order_id).await {
             Ok(detail) => detail,
             Err(e) => {
-                warn!(order_id = %order_id, error = %e, "Failed to fetch order detail");
+                warn!(order_id = %order_id, error = %e, "获取订单详情失败");
                 sleep(retry_delay).await;
                 continue;
             }
@@ -412,19 +412,19 @@ async fn sell_background_task(
         remaining = (remaining - filled).max(decimal!(0));
 
         match order_detail.status {
-            OrderStatus::Filled => info!(order_id = %order_id, "Order fully filled"),
+            OrderStatus::Filled => info!(order_id = %order_id, "订单已全部成交"),
             OrderStatus::PartialFilled if remaining < decimal!(1) => {
-                info!(order_id = %order_id, filled = %filled, "Partially filled, less than 1 unit, stop");
+                info!(order_id = %order_id, filled = %filled, "部分成交，剩余不足1单位，停止重试");
             }
             OrderStatus::PartialFilled => {
-                info!(order_id = %order_id, filled = %filled, remaining = %remaining, "Partially filled, continue");
+                info!(order_id = %order_id, filled = %filled, remaining = %remaining, "部分成交，继续尝试");
             }
             status if is_order_terminal(&status) => {
-                warn!(order_id = %order_id, ?status, "Order in terminal state");
+                warn!(order_id = %order_id, ?status, "订单已进入终态，不再重试");
             }
             _ => {
                 if is_order_active_and_cancellable(&order_detail.status) {
-                    info!(order_id = %order_id, "Cancelling unfilled order");
+                    info!(order_id = %order_id, "正在取消未成交订单");
                     let _ = trade_ctx.cancel_order(&order_id).await;
                 }
             }
@@ -434,9 +434,9 @@ async fn sell_background_task(
     }
 
     if remaining >= decimal!(1) {
-        error!(symbol, remaining = %remaining, "Sell task failed after retries");
+        error!(symbol, remaining = %remaining, "卖出任务在多次重试后仍失败");
     } else {
-        info!(symbol, "Sell task completed successfully");
+        info!(symbol, "卖出任务执行完成");
     }
 }
 
@@ -453,7 +453,7 @@ async fn buy_position(
 
     let price = get_ask_price(&quote_ctx, symbol)
         .await
-        .ok_or_else(|| TradingError::QuoteError("Failed to get ask price".to_string()))?;
+        .ok_or_else(|| TradingError::QuoteError("获取卖一价失败".to_string()))?;
 
     let opts =
         EstimateMaxPurchaseQuantityOptions::new(symbol, OrderType::LO, OrderSide::Buy).price(price);
@@ -466,7 +466,7 @@ async fn buy_position(
     let quantity = (estimate.cash_max_qty * decimal!(ratio)).trunc();
 
     if quantity < decimal!(1) {
-        warn!(symbol, "Insufficient quantity to buy");
+        warn!(symbol, "买入数量不足");
         return Ok(());
     }
 
@@ -483,7 +483,7 @@ async fn buy_position(
     // 启动新闻分析
     tokio::spawn(analyze_news_handler());
 
-    info!(symbol, quantity = %quantity, "Buy task started in background");
+    info!(symbol, quantity = %quantity, "买入任务已启动（后台运行）");
     Ok(())
 }
 
@@ -510,7 +510,7 @@ async fn sell_position(
         Duration::from_secs(RETRY_DELAY_SECS),
     ));
 
-    info!(symbol, quantity = %target, "Sell task started in background");
+    info!(symbol, quantity = %target, "卖出任务已启动（后台运行）");
     Ok(())
 }
 
@@ -560,7 +560,7 @@ async fn do_close_all(
             tokio::spawn(async move {
                 if let Err(e) = sell_position(trade_ctx, quote_ctx, &pos.symbol, pos.quantity).await
                 {
-                    error!(error = %e, "Close position task failed");
+                    error!(error = %e, "平仓任务失败");
                 }
             });
         }
@@ -588,31 +588,31 @@ async fn webhook_handler(
     let action = match payload.action.to_lowercase().as_str() {
         "buy" => TradeAction::Buy,
         "sell" => TradeAction::Sell,
-        _ => return Err(TradingError::ParseError("Invalid action".to_string())),
+        _ => return Err(TradingError::ParseError("无效的参数 action".to_string())),
     };
 
     let sentiment = match payload.sentiment.to_lowercase().as_str() {
         "long" => MarketSentiment::Long,
         "short" => MarketSentiment::Short,
         "flat" => MarketSentiment::Flat,
-        _ => return Err(TradingError::ParseError("Invalid sentiment".to_string())),
+        _ => return Err(TradingError::ParseError("无效的参数 sentiment".to_string())),
     };
 
     let ticker = payload.ticker;
     let (long_symbol, short_symbol) = get_symbols_for_ticker(&ticker)
-        .ok_or_else(|| TradingError::ParseError(format!("Unknown ticker: {}", ticker)))?;
+        .ok_or_else(|| TradingError::ParseError(format!("无效的参数 ticker: {}", ticker)))?;
 
-    info!(?action, ?sentiment, ticker, "Parsed signal");
+    info!(?action, ?sentiment, ticker, "信号解析完成");
 
     match (&action, &sentiment) {
         (TradeAction::Buy, MarketSentiment::Long) => do_long(&state, long_symbol).await?,
         (TradeAction::Sell, MarketSentiment::Short) => do_short(&state, short_symbol).await?,
         (_, MarketSentiment::Flat) => do_close_all(&state, long_symbol, short_symbol).await?,
         _ => {
-            warn!(?action, ?sentiment, "Unknown signal combination");
+            warn!(?action, ?sentiment, "未知的信号组合");
             return Ok(Json(WebApiResponse {
                 status: "success",
-                message: Some("Unknown signal combination".to_string()),
+                message: Some("未知的信号组合".to_string()),
             }));
         }
     }
@@ -676,10 +676,10 @@ async fn call_ai_analyze(
     let ai_resp: ModelScopeResponse = response.json().await?;
     let raw_content = ai_resp.choices[0].message.content.trim();
 
-    debug!("Raw AI response: {}", raw_content);
+    debug!("AI 分析: {}", raw_content);
 
     let analysis: AiAnalysis = serde_json::from_str(raw_content).map_err(|e| {
-        error!("JSON parse error: {}", e);
+        error!("JSON 解析失败: {}", e);
         error!("Raw content: {}", raw_content);
         "AI 返回内容不是合法 JSON"
     })?;
@@ -737,14 +737,14 @@ async fn fetch_wallstreet_news(
 }
 
 async fn analyze_news_handler() -> Result<Json<AnalysisResponse>, impl IntoResponse> {
-    info!("Received request to analyze news");
+    info!("开始分析新闻");
 
     let http_client = Client::new();
 
     let all_news = match fetch_wallstreet_news(&http_client, MAX_NEWS_COUNT).await {
         Ok(news) => news,
         Err(e) => {
-            warn!("Failed to fetch news: {}", e);
+            warn!("无法获取新闻: {}", e);
             return Err((
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -789,7 +789,7 @@ async fn analyze_news_handler() -> Result<Json<AnalysisResponse>, impl IntoRespo
             }))
         }
         Err(e) => {
-            error!("AI analysis failed: {}", e);
+            error!("AI 分析失败: {}", e);
 
             let body = "新闻分析失败，请检查配置";
             let _ = send_email("盘整突破交易系统".to_string(), body.to_string()).await;
@@ -812,7 +812,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting server...");
+    info!("服务启动中...");
 
     let config = Arc::new(Config::from_env()?);
     let (quote_ctx, _) = QuoteContext::try_new(config.clone()).await?;
@@ -836,7 +836,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
-    info!("Listening on: {}", addr);
+    info!("服务启动后地址: {}", addr);
 
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
