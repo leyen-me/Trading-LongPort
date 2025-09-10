@@ -1,5 +1,7 @@
 use axum::http;
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get, routing::post};
+use chrono;
+use lettre::message::Mailbox;
 use longport::Decimal;
 use longport::{
     Config, decimal,
@@ -9,6 +11,7 @@ use longport::{
         SubmitOrderOptions, TimeInForceType, TradeContext,
     },
 };
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -21,12 +24,22 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
+use lettre::message::header::ContentType;
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{Message, SmtpTransport, Transport};
+
 /// ==================== Constants ====================
 const DEFAULT_PURCHASE_RATIO: f64 = 0.5; // 每次都半仓买入
 const DEFAULT_SELL_RATIO: f64 = 0.5; // 每次都半仓卖出
 const RETRY_COUNT: usize = 5;
 const RETRY_DELAY_SECS: u64 = 10;
 const ORDER_WAIT_SECS: u64 = 30;
+
+const WALLSTREET_API: &str = "https://api-prod.wallstreetcn.com/apiv1/content/lives"; // 华尔街见闻 api 地址
+const CHANNEL: &str = "us-stock-channel"; // 美股快讯
+const MAX_NEWS_COUNT: usize = 20;
+
+const AI_BASE_API: &str = "https://api-inference.modelscope.cn/v1/chat/completions";
 
 /// Symbol mapping config
 /// 股票代码映射，例如你的Webhook监听的 TSLA 发出的信号，需要对 TSLA 做多或者做空（靠ETF实现）
@@ -50,6 +63,60 @@ enum MarketSentiment {
     Long,
     Short,
     Flat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RawNewsItem {
+    id: i64,
+    content_text: String,
+    display_time: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NewsItem {
+    id: i64,
+    time: String,
+    timestamp: i64,
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WallStreetResponse {
+    data: WallStreetData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WallStreetData {
+    items: Vec<RawNewsItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AiAnalysis {
+    volatility: u8,
+    direction: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnalysisResponse {
+    volatility: u8,
+    direction: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+struct ModelScopeResponse {
+    choices: Vec<Choice>,
+}
+
+#[derive(Deserialize)]
+struct Choice {
+    message: ChoiceMessage,
+}
+
+#[derive(Deserialize)]
+struct ChoiceMessage {
+    content: String,
 }
 
 /// ==================== Webhook Payload ====================
@@ -143,6 +210,43 @@ fn build_limit_order(
             .submitted_price(price)
             .outside_rth(OutsideRTH::AnyTime);
     order
+}
+
+/// ==================== Email Utilities ====================
+async fn send_email(
+    subject: String,
+    body: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let smtp_username = "672228275@qq.com";
+    let smtp_password = env::var("SMTP_PASSWORD").map_err(|_| "SMTP_PASSWORD not set")?;
+
+    let email = Message::builder()
+        .from(Mailbox::new(
+            Some(smtp_username.to_owned()),
+            smtp_username.parse().unwrap(),
+        ))
+        .to(Mailbox::new(
+            Some(smtp_username.to_owned()),
+            smtp_username.parse().unwrap(),
+        ))
+        .subject(subject)
+        .header(ContentType::TEXT_PLAIN)
+        .body(body)
+        .unwrap();
+
+    let creds = Credentials::new(smtp_username.to_owned(), smtp_password);
+
+    let mailer = SmtpTransport::relay("smtp.qq.com")
+        .unwrap()
+        .credentials(creds)
+        .build();
+
+    match mailer.send(&email) {
+        Ok(_) => info!("📧 Email sent successfully"),
+        Err(e) => error!("📧 Failed to send email: {}", e),
+    }
+
+    Ok(())
 }
 
 /// ==================== Quote Utilities ====================
@@ -376,6 +480,9 @@ async fn buy_position(
         Duration::from_secs(RETRY_DELAY_SECS),
     ));
 
+    // 启动新闻分析
+    tokio::spawn(analyze_news_handler());
+
     info!(symbol, quantity = %quantity, "Buy task started in background");
     Ok(())
 }
@@ -393,7 +500,7 @@ async fn sell_position(
         .unwrap_or(DEFAULT_SELL_RATIO);
 
     let target = (quantity * decimal!(ratio)).trunc();
-
+    
     tokio::spawn(sell_background_task(
         trade_ctx,
         quote_ctx,
@@ -527,6 +634,176 @@ async fn webhook_test_handler(Json(payload): Json<serde_json::Value>) -> impl In
     )
 }
 
+async fn call_ai_analyze(
+    client: &Client,
+    news_content: &str,
+) -> Result<AiAnalysis, Box<dyn std::error::Error + Send + Sync>> {
+    let api_key = std::env::var("MODELSCOPE_API_KEY")
+        .map_err(|_| "❌ 环境变量 MODELSCOPE_API_KEY 未设置！")?;
+
+    let model_id = std::env::var("MODEL_ID")
+        .unwrap_or_else(|_| "Qwen/Qwen3-235B-A22B-Instruct-2507".to_string());
+
+    let system_prompt = format!(
+        "现在是北京时间 {}。\n\n你是一名专业的美股分析师。请基于以下提供的新闻内容，对特斯拉（Tesla, Inc., 股票代码：TSLA）进行综合分析。\n\n分析应包括：\n- 新闻摘要与关键点提炼\n- 基本面影响\n- 市场情绪\n- 风险与机会\n\n请输出一个 JSON 对象，包含：\n- \"volatility\": 0–100 分数（>50 表示波动加剧）\n- \"direction\": \"up\"、\"down\" 或 \"sideways\"\n- \"reason\": 一句话（不超过30字）\n\n只返回合法 JSON，无额外内容。",
+        chrono::Local::now().format("%Y年%m月%d日 %H:%M")
+    );
+
+    let payload = serde_json::json!({
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": news_content}
+        ]
+    });
+
+    let response = client
+        .post(AI_BASE_API)
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "HTTP {}: {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        )
+        .into());
+    }
+
+    let ai_resp: ModelScopeResponse = response.json().await?;
+    let raw_content = ai_resp.choices[0].message.content.trim();
+
+    debug!("Raw AI response: {}", raw_content);
+
+    let analysis: AiAnalysis = serde_json::from_str(raw_content).map_err(|e| {
+        error!("JSON parse error: {}", e);
+        error!("Raw content: {}", raw_content);
+        "AI 返回内容不是合法 JSON"
+    })?;
+
+    // 校验方向
+    if !["up", "down", "sideways"].contains(&analysis.direction.as_str()) {
+        return Err("AI 返回的 direction 不合法".into());
+    }
+
+    Ok(analysis)
+}
+
+async fn fetch_wallstreet_news(
+    client: &Client,
+    limit: usize,
+) -> Result<Vec<NewsItem>, Box<dyn std::error::Error + Send + Sync>> {
+    let params = [
+        ("channel", CHANNEL),
+        ("client", "pc"),
+        ("cursor", "0"),
+        ("limit", &limit.to_string()),
+    ];
+    let response = client.get(WALLSTREET_API).query(&params).send().await?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "HTTP {}: {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        )
+        .into());
+    }
+
+    let json: WallStreetResponse = response.json().await?;
+    let mut news_list = Vec::new();
+
+    for item in json.data.items {
+        if item.content_text.trim().len() < 10 {
+            continue;
+        }
+
+        let time_str = chrono::DateTime::from_timestamp(item.display_time, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        news_list.push(NewsItem {
+            id: item.id,
+            content: item.content_text,
+            time: time_str,
+            timestamp: item.display_time,
+        });
+    }
+
+    Ok(news_list)
+}
+
+async fn analyze_news_handler() -> Result<Json<AnalysisResponse>, impl IntoResponse> {
+    info!("Received request to analyze news");
+
+    let http_client = Client::new();
+
+    let all_news = match fetch_wallstreet_news(&http_client, MAX_NEWS_COUNT).await {
+        Ok(news) => news,
+        Err(e) => {
+            warn!("Failed to fetch news: {}", e);
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "无法获取新闻",
+                    "detail": e.to_string()
+                })),
+            ));
+        }
+    };
+
+    if all_news.is_empty() {
+        return Ok(Json(AnalysisResponse {
+            volatility: 30,
+            direction: "sideways".to_string(),
+            reason: "暂无相关新闻".to_string(),
+        }));
+    }
+
+    // 3. 拼接内容
+    let news_input = all_news
+        .iter()
+        .map(|n| format!("[{}] {}", n.time, n.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    // 4. 调用 AI
+    match call_ai_analyze(&http_client, &news_input).await {
+        Ok(analysis) => {
+            info!(
+                volatility = analysis.volatility,
+                direction = %analysis.direction,
+                reason = %analysis.reason,
+                "AI 分析完成"
+            );
+
+            let body: String = format!("{:?}", analysis);
+            let _ = send_email("盘整突破交易系统".to_string(), body).await;
+            Ok(Json(AnalysisResponse {
+                volatility: analysis.volatility,
+                direction: analysis.direction,
+                reason: analysis.reason,
+            }))
+        }
+        Err(e) => {
+            error!("AI analysis failed: {}", e);
+
+            let body = "新闻分析失败，请检查配置";
+            let _ = send_email("盘整突破交易系统".to_string(), body.to_string()).await;
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "AI 分析失败",
+                    "detail": e.to_string()
+                })),
+            ))
+        }
+    }
+}
+
 /// ==================== Main ====================
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -549,6 +826,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/webhook", post(webhook_handler))
         .route("/webhook_test", post(webhook_test_handler))
+        .route("/analyze_news", post(analyze_news_handler))
         .route("/health", get(|| async { "OK" }))
         .with_state(state)
         .layer(

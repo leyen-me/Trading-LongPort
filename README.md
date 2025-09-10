@@ -14,9 +14,10 @@
 ✅ 使用限价单（LO）基于实时盘口价格下单（ask/bid）  
 ✅ 智能仓位管理：按账户可买数量的百分比下单（可配置）  
 ✅ 卖出任务支持多轮重试与自动取消未成交订单  
-✅ 异步非阻塞架构，高可靠性与可观测性（tracing 日志）  
-✅ CORS 安全防护 + 健康检查端点  
-
+✅ 异步非阻塞架构，高可靠性与可观测性（tracing 日志）
+✅ 使用QWEN3，在买入后进行新闻、情绪分析
+✅ 邮件发送提醒
+✅ CORS 安全防护 + 健康检查端点
 ---
 
 ## 📡 信号协议（Webhook Payload）
@@ -95,6 +96,9 @@ cargo build
 LONGPORT_APP_KEY=xxx
 LONGPORT_APP_SECRET=xxx
 LONGPORT_ACCESS_TOKEN=xxx
+
+MODELSCOPE_API_KEY=xxx
+SMTP_PASSWORD=xxx
 
 # 可选
 MAX_PURCHASE_RATIO=0.5
