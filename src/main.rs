@@ -438,7 +438,7 @@ async fn do_close(
             if ![symbol].contains(&pos.symbol.as_str()) {
                 continue;
             }
-            let target_quantity = (pos.quantity * decimal!(ratio)).trunc();
+            let target_quantity = (pos.quantity.abs() * decimal!(ratio)).trunc();
             let trade_ctx = Arc::clone(&state.trade_ctx);
             let quote_ctx = Arc::clone(&state.quote_ctx);
             match action {
@@ -502,8 +502,6 @@ async fn webhook_handler(
     };
 
     let symbol = payload.ticker + ".US";
-
-    info!(?action, ?sentiment, symbol, "信号解析完成");
 
     match (&action, &sentiment) {
         (TradeAction::Buy, MarketSentiment::Long) => do_long(&state, &symbol).await?,
