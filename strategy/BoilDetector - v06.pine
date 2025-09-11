@@ -1,5 +1,9 @@
 //@version=6
-strategy(title = "盘整突破交易系统", shorttitle = "盘整破位", overlay = true, initial_capital = 10000, max_bars_back = 5000, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = false, process_orders_on_close = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 90)
+strategy(title = "财报突破交易系统", shorttitle = "财报破位", overlay = true, initial_capital = 10000, max_bars_back = 5000, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = false, process_orders_on_close = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 90)
+
+
+// 财报前开启
+// 使用4MIN 为单位，3min 太小，5min 太久
 
 // ================================
 // 参数设置区
@@ -9,7 +13,7 @@ strategy(title = "盘整突破交易系统", shorttitle = "盘整破位", overla
 grpCore = "核心逻辑"
 inputWindowSize = input.int(12, "盘整检测窗口 N", minval = 5, group = grpCore, tooltip = "用于ATR、均量、实体均值等统计")
 inputConsolidationBarCount = input.int(8, "窄区间连续K线阈值", minval = 3, group = grpCore, tooltip = "连续多少根低波动K线可辅助判定为盘整")
-inputBoxTightRatio = input.float(1.4, "箱体紧致度系数", minval = 0.1, step = 0.1, maxval = 3, group = grpCore, tooltip = "箱体高度 < 平均真波幅 * 该系数 → 视为‘窄’")
+inputBoxTightRatio = input.float(1.5, "箱体紧致度系数", minval = 0.1, step = 0.1, maxval = 3, group = grpCore, tooltip = "箱体高度 < 平均真波幅 * 该系数 → 视为‘窄’")
 inputVolumeAvgLength = input.int(20, "均量周期", minval = 10, group = grpCore)
 
 // 突破判定参数
@@ -21,14 +25,14 @@ inputBodySizeMultiplier = input.float(1.5, "大实体倍数(相对近期均值)"
 grpPulse = "脉冲过滤"
 inputVolumeMultiplier = input.float(2.0, "放量倍数(当前/均量)", minval = 1.0, step = 0.1, group = grpPulse)
 inputZScoreLength = input.int(20, "Z-Score计算周期", minval = 10, group = grpPulse)
-inputZScoreThreshold = input.float(2.1, "Z-Score阈值", minval = 1.0, step = 0.1, group = grpPulse)
+inputZScoreThreshold = input.float(2, "Z-Score阈值", minval = 1.0, step = 0.1, group = grpPulse)
 
 // 风控与出场参数
 grpRisk = "风控与出场"
 inputAtrLength = input.int(30, "ATR长度", minval = 5, group = grpRisk)
-inputAtrStopLossMultiplier = input.float(1.4, "初始止损ATR倍数", minval = 0.5, step = 0.1, group = grpRisk)
-inputTsllAtrMultiplier = input.float(6.7, "跟踪止损ATR倍数", minval = 0.5, step = 0.1, group = grpRisk)
-inputRiskRewardRatio = input.float(6.2, "风险回报比(RR)", minval = 1.0, step = 0.1, group = grpRisk)
+inputAtrStopLossMultiplier = input.float(3, "初始止损ATR倍数", minval = 0.5, step = 0.1, group = grpRisk)
+inputTsllAtrMultiplier = input.float(4, "跟踪止损ATR倍数", minval = 0.5, step = 0.1, group = grpRisk)
+inputRiskRewardRatio = input.float(8, "风险回报比(RR)", minval = 1.0, step = 0.1, group = grpRisk)
 
 // ================================
 // 基础指标计算

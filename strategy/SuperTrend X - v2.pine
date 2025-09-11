@@ -1,0 +1,33 @@
+//@version=6
+strategy("Supertrend Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=15)
+
+atrPeriod = input(10, "ATR Length")
+factor = input.float(3.0, "Factor", step = 0.01)
+takeProfitPct = input.float(10.0, "Take Profit (%)", step = 0.1)
+initialStopLossPct = input.float(8.0, "Initial Stop Loss (%)", step = 0.1)
+breakevenTriggerPct = input.float(2.0, "Move to Breakeven at (%)", step = 0.1)
+
+[_, direction] = ta.supertrend(factor, atrPeriod)
+
+if ta.change(direction) < 0 and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long)
+
+if ta.change(direction) > 0
+    strategy.close("LONG")
+
+var float takeProfitPrice = na
+takeProfitPrice := strategy.position_avg_price * (1 + takeProfitPct / 100)
+
+var float initialStopPrice = na
+initialStopPrice := strategy.position_avg_price * (1 - initialStopLossPct / 100)
+
+var bool breakevenActivated = false
+
+priceAboveBreakeven = close >= strategy.position_avg_price * (1 + breakevenTriggerPct / 100)
+
+if (strategy.position_size > 0 and not breakevenActivated and priceAboveBreakeven)
+    breakevenActivated := true
+    label.new(bar_index, high, "BE Active", color=color.orange, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar, size=size.small)
+
+if strategy.position_size > 0
+    strategy.exit("止盈", from_entry = "LONG", limit = takeProfitPrice)

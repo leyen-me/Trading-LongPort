@@ -15,8 +15,6 @@
 ✅ 智能仓位管理：按账户可买数量的百分比下单（可配置）  
 ✅ 卖出任务支持多轮重试与自动取消未成交订单  
 ✅ 异步非阻塞架构，高可靠性与可观测性（tracing 日志）
-✅ 使用QWEN3，在买入后进行新闻、情绪分析
-✅ 邮件发送提醒
 ✅ CORS 安全防护 + 健康检查端点
 ---
 
@@ -40,9 +38,10 @@ TradingView 发送的 JSON 示例：
 
 | action | sentiment | 行为                             |
 |--------|-----------|----------------------------------|
-| buy    | long      | 买入 TSLL.US（做多）             |
-| sell   | short     | 买入 TSLQ.US（等效做空）         |
-| *      | flat      | 平掉 TSLL.US 或 TSLQ.US 所有持仓 |
+| buy    | long      | 做多             |
+| sell   | short     | 做空         |
+| buy    | flat      | 平空             |
+| sell   | flat     | 平多        |
 | 其他   | —         | 忽略                             |
 
 ## ⚙️ 环境依赖与配置
@@ -96,9 +95,6 @@ cargo build
 LONGPORT_APP_KEY=xxx
 LONGPORT_APP_SECRET=xxx
 LONGPORT_ACCESS_TOKEN=xxx
-
-MODELSCOPE_API_KEY=xxx
-SMTP_PASSWORD=xxx
 
 # 可选
 MAX_PURCHASE_RATIO=0.5
@@ -154,14 +150,3 @@ curl http://localhost:8080/health
 - 添加 **Token 验证**（如在 query 中加 `?token=xxx`，并在 handler 中校验）
 - 限制 IP（TradingView IP 白名单）
 - 使用 `tower-http` 的 `RequireAuthorizationLayer` 增强安全性
-
----
-
-## 📊 当前支持的 ETF
-
-| Symbol     | 名称                     | 类型     |
-|------------|--------------------------|----------|
-| `TSLL.US`  | Direxion Tesla Bull 2X | 做多杠杆 |
-| `TSLQ.US`  | Direxion Tesla Bear 2X | 做空杠杆 |
-
-> 🔁 你可以在代码中修改 `SYMBOL_LONG` / `SYMBOL_SHORT` 替换为其他标的（如 SQQQ/TQQQ、SPXU/SPXL 等）
