@@ -1,21 +1,20 @@
 # Trading LongPort 🚀
 
-> 一个基于 Rust 的高性能自动化交易服务，通过 TradingView Webhook 驱动 LongPort 账户执行做多 / 做空 ETF 策略。
+> 一个基于 Rust 的高性能自动化交易服务，通过 TradingView Webhook 驱动 LongPort 账户执行做多 / 做空策略。
 
-本项目使用 **Rust + Axum + LongPort OpenAPI SDK** 构建，实现从 TradingView 发出信号到 LongPort 券商自动下单的完整链路。支持对冲式 ETF 交易（如 TSLL.US 做多，TSLQ.US 做空），适用于趋势跟踪、均值回归等量化策略的实盘部署。
+本项目使用 **Rust + Axum + LongPort OpenAPI SDK** 构建，实现从 TradingView 发出信号到 LongPort 券商自动下单的完整链路。支持做多和做空，支持融资，适用于趋势跟踪、均值回归等量化策略的实盘部署。
 
 ---
 
 ## 🔍 核心功能
 
 ✅ 接收 TradingView Webhook 信号并解析  
-✅ 自动在 LongPort 账户中开仓（买入 TSLL.US 或 TSLQ.US）或平仓  
+✅ 自动在 LongPort 账户中开仓或平仓  
 ✅ 支持“做多”、“做空”、“平仓”三种信号组合  
 ✅ 使用限价单（LO）基于实时盘口价格下单（ask/bid）  
 ✅ 智能仓位管理：按账户可买数量的百分比下单（可配置）  
-✅ 卖出任务支持多轮重试与自动取消未成交订单  
+✅ 买入和卖出任务支持多轮重试与自动取消未成交订单  
 ✅ 异步非阻塞架构，高可靠性与可观测性（tracing 日志）
-✅ CORS 安全防护 + 健康检查端点
 ---
 
 ## 📡 信号协议（Webhook Payload）
