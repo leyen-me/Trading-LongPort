@@ -41,6 +41,11 @@ enum MarketSentiment {
     Flat,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum TradingMode {
+    Cash,
+    Margin,
+}
 /// ==================== Webhook Payload ====================
 #[derive(Deserialize, Debug)]
 struct WebhookRequest {
@@ -135,6 +140,36 @@ fn build_limit_order(
     order
 }
 
+fn parse_trading_mode() -> TradingMode {
+    let mode = env::var("TRADING_MODE")
+        .unwrap_or_else(|_| "cash".to_string())
+        .to_lowercase();
+    match mode.as_str() {
+        "margin" => TradingMode::Margin,
+        "cash" => TradingMode::Cash,
+        _ => {
+            warn!("未知的 TRADING_MODE: {}, 默认使用 'cash'", mode);
+            TradingMode::Cash
+        }
+    }
+}
+
+fn parse_ratio(env_var: &str, default: f64) -> f64 {
+    let value: f64 = env::var(env_var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default);
+
+    if value < 0.0 {
+        warn!("环境变量 {} 的值 {} < 0，已修正为 0.0", env_var, value);
+        0.0
+    } else if value > 1.0 {
+        warn!("环境变量 {} 的值 {} > 1.0，已修正为 1.0", env_var, value);
+        1.0
+    } else {
+        value
+    }
+}
 /// ==================== Quote Utilities ====================
 async fn get_ask_price(ctx: &QuoteContext, symbol: &str) -> Option<Decimal> {
     ctx.depth(symbol)
@@ -330,10 +365,8 @@ async fn sell_background_task(
 async fn do_long(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), TradingError> {
     let state = state.lock().await;
 
-    let ratio: f64 = env::var("MAX_PURCHASE_RATIO")
-        .unwrap_or_else(|_| DEFAULT_PURCHASE_RATIO.to_string())
-        .parse()
-        .unwrap_or(DEFAULT_PURCHASE_RATIO);
+    let trading_mode = parse_trading_mode();
+    let ratio = parse_ratio("MAX_PURCHASE_RATIO", DEFAULT_PURCHASE_RATIO);
 
     let price = get_ask_price(&state.quote_ctx, symbol)
         .await
@@ -348,7 +381,11 @@ async fn do_long(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), Tradi
         .await
         .map_err(|e| TradingError::SdkError(e.to_string()))?;
 
-    let quantity = (estimate.cash_max_qty * decimal!(ratio)).trunc();
+    let max_qty = match trading_mode {
+        TradingMode::Cash => estimate.cash_max_qty,
+        TradingMode::Margin => estimate.margin_max_qty,
+    };
+    let quantity = (max_qty * decimal!(ratio)).trunc();
 
     if quantity < decimal!(1) {
         warn!(symbol, "买入数量不足");
@@ -374,10 +411,8 @@ async fn do_long(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), Tradi
 async fn do_short(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), TradingError> {
     let state = state.lock().await;
 
-    let ratio: f64 = env::var("MAX_PURCHASE_RATIO")
-        .unwrap_or_else(|_| DEFAULT_PURCHASE_RATIO.to_string())
-        .parse()
-        .unwrap_or(DEFAULT_PURCHASE_RATIO);
+    let trading_mode = parse_trading_mode();
+    let ratio = parse_ratio("MAX_PURCHASE_RATIO", DEFAULT_PURCHASE_RATIO);
 
     let price = get_bid_price(&state.quote_ctx, symbol)
         .await
@@ -392,7 +427,11 @@ async fn do_short(state: &Arc<Mutex<AppState>>, symbol: &str) -> Result<(), Trad
         .await
         .map_err(|e| TradingError::SdkError(e.to_string()))?;
 
-    let quantity = (estimate.cash_max_qty * decimal!(ratio)).trunc();
+    let max_qty = match trading_mode {
+        TradingMode::Cash => estimate.cash_max_qty,
+        TradingMode::Margin => estimate.margin_max_qty,
+    };
+    let quantity = (max_qty * decimal!(ratio)).trunc();
 
     if quantity < decimal!(1) {
         warn!(symbol, "卖出数量不足");
@@ -422,10 +461,7 @@ async fn do_close(
 ) -> Result<(), TradingError> {
     let state = state.lock().await;
 
-    let ratio: f64 = env::var("MAX_SELL_RATIO")
-        .unwrap_or_else(|_| DEFAULT_SELL_RATIO.to_string())
-        .parse()
-        .unwrap_or(DEFAULT_SELL_RATIO);
+    let ratio = parse_ratio("MAX_SELL_RATIO", DEFAULT_SELL_RATIO);
 
     let resp = state
         .trade_ctx
@@ -476,10 +512,8 @@ async fn do_close(
 ///
 /// {
 ///    "ticker": "{{ticker}}",
-///    "time": "{{time}}",
 ///    "action": "{{strategy.order.action}}",
 ///    "sentiment": "{{strategy.market_position}}",
-///    "price": "{{strategy.order.price}}"
 /// }
 ///
 async fn webhook_handler(
