@@ -8,7 +8,7 @@
 // ================================
 
 //@version=6
-strategy(title = "突破交易系统", shorttitle = "突破交易", overlay = true, initial_capital = 10000, max_bars_back = 5000, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = false, process_orders_on_close = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 50)
+strategy(title = "财报突破交易系统", shorttitle = "财报突破", overlay = true, initial_capital = 10000, max_bars_back = 5000, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_every_tick = false, process_orders_on_close = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 50)
 
 // ================================
 // 参数设置区
@@ -252,16 +252,5 @@ if shouldExitLongByTrailingStop or shouldExitLongByInitialStop or shouldExitLong
 if shouldExitShortByTrailingStop or shouldExitShortByInitialStop or shouldExitShortByTakeProfit
     exitReason = shouldExitShortByTrailingStop ? "跟踪止损" : shouldExitShortByInitialStop ? "初始止损" : "止盈达成"
     strategy.close("SHORT", comment = exitReason)
-
-
-// ================================
-// 信号后重置盘整区（防止重复触发）
-// ================================
-
-// 一旦发出突破信号，清除当前盘整区，等待新周期重新形成
-if buySignal or sellSignal
-    lastConsolidationHigh := na
-    lastConsolidationLow := na
-    consolidationSetBarIndex := na
 
 bgcolor(allowTrading ? color.new(color.green, 85) : na, title = "财报交易区间")
